@@ -1,0 +1,443 @@
+package com.fluortronix.fluortronixapp.data.datasource
+
+import android.Manifest
+import android.content.BroadcastReceiver
+import android.content.Context
+import android.content.Intent
+import android.content.IntentFilter
+import android.content.pm.PackageManager
+import android.net.ConnectivityManager
+import android.net.NetworkCapabilities
+import android.net.NetworkRequest
+import android.net.wifi.ScanResult
+import android.net.wifi.WifiInfo
+import android.net.wifi.WifiManager
+import android.net.wifi.WifiNetworkSpecifier
+import android.os.Build
+import androidx.core.app.ActivityCompat
+import java.net.InetAddress
+import java.net.NetworkInterface
+import dagger.hilt.android.qualifiers.ApplicationContext
+import kotlinx.coroutines.channels.awaitClose
+import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.callbackFlow
+import kotlinx.coroutines.suspendCancellableCoroutine
+import kotlinx.coroutines.GlobalScope
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.delay
+import kotlin.coroutines.resume
+import javax.inject.Inject
+
+class WifiService @Inject constructor(
+    @ApplicationContext private val context: Context
+) {
+    private val wifiManager = context.applicationContext.getSystemService(Context.WIFI_SERVICE) as WifiManager
+
+    fun getNetworks(): Flow<List<ScanResult>> = callbackFlow {
+        val wifiScanReceiver = object : BroadcastReceiver() {
+            override fun onReceive(context: Context, intent: Intent) {
+                val success = intent.getBooleanExtra(WifiManager.EXTRA_RESULTS_UPDATED, false)
+                if (success) {
+                    if (ActivityCompat.checkSelfPermission(
+                            context,
+                            Manifest.permission.ACCESS_FINE_LOCATION
+                        ) == PackageManager.PERMISSION_GRANTED
+                    ) {
+                        trySend(wifiManager.scanResults)
+                    }
+                }
+            }
+        }
+
+        val intentFilter = IntentFilter()
+        intentFilter.addAction(WifiManager.SCAN_RESULTS_AVAILABLE_ACTION)
+        context.registerReceiver(wifiScanReceiver, intentFilter)
+
+        wifiManager.startScan()
+
+        awaitClose {
+            context.unregisterReceiver(wifiScanReceiver)
+        }
+    }
+
+    fun connectToWifi(ssid: String, pass: String, isEspDevice: Boolean = false) {
+        if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.Q) {
+            // Use WifiNetworkSpecifier for API 29+
+            val specifier = WifiNetworkSpecifier.Builder()
+                .setSsid(ssid)
+                .setWpa2Passphrase(pass)
+                .build()
+
+            val networkRequest = NetworkRequest.Builder()
+                .addTransportType(NetworkCapabilities.TRANSPORT_WIFI)
+                .setNetworkSpecifier(specifier)
+                .build()
+
+            val connectivityManager = context.getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager
+
+            connectivityManager.requestNetwork(networkRequest, object : ConnectivityManager.NetworkCallback() {
+                override fun onAvailable(network: android.net.Network) {
+                    super.onAvailable(network)
+                    if (isEspDevice) {
+                    connectivityManager.bindProcessToNetwork(network)
+                }
+            }
+
+                override fun onUnavailable() {
+                    super.onUnavailable()
+                    // Handle connection failure
+                }
+            })
+        } else {
+            // For API levels < 29, show a message to user to manually connect
+            // or implement legacy WifiManager approach if needed
+            // Note: WifiManager.addNetwork() was deprecated in API 29
+        }
+    }
+
+    // Store the last connected WiFi network for rebinding
+    private var lastWifiNetwork: android.net.Network? = null
+    private val connectivityManager by lazy { 
+        context.getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager 
+    }
+
+    suspend fun connectToWifiAsync(ssid: String, pass: String, isEspDevice: Boolean = false): Result<android.net.Network> {
+        return suspendCancellableCoroutine { continuation ->
+            if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.Q) {
+                val specifier = WifiNetworkSpecifier.Builder()
+                    .setSsid(ssid)
+                    .setWpa2Passphrase(pass)
+                    .build()
+
+                val networkRequest = NetworkRequest.Builder()
+                    .addTransportType(NetworkCapabilities.TRANSPORT_WIFI)
+                    .setNetworkSpecifier(specifier)
+                    .build()
+
+            val callback = object : ConnectivityManager.NetworkCallback() {
+                override fun onAvailable(network: android.net.Network) {
+                    super.onAvailable(network)
+                    println("DEBUG: WiFi connection available for $ssid")
+                    
+                    if (isEspDevice) {
+                        connectivityManager.bindProcessToNetwork(network)
+                        println("DEBUG: Process bound to ESP network")
+                    } else {
+                        // For target WiFi networks, store network reference but delay binding
+                        // to allow Android to establish proper connection quality first
+                        lastWifiNetwork = network
+                        println("DEBUG: Target WiFi network connected: $ssid (binding delayed for stability)")
+                        
+                        // Delay binding to allow network to stabilize
+                        GlobalScope.launch {
+                            delay(3000) // Wait 3 seconds for connection to stabilize
+                            try {
+                                connectivityManager.bindProcessToNetwork(network)
+                                println("DEBUG: Process bound to stabilized WiFi network: $ssid")
+                            } catch (e: Exception) {
+                                println("DEBUG: Failed to bind to network after delay: ${e.message}")
+                            }
+                        }
+                    }
+                    
+                    if (continuation.isActive) {
+                        continuation.resume(Result.success(network))
+                    }
+                }
+
+                override fun onUnavailable() {
+                    super.onUnavailable()
+                    println("DEBUG: WiFi connection unavailable for $ssid")
+                    if (continuation.isActive) {
+                        continuation.resume(Result.failure(Exception("WiFi connection unavailable")))
+                    }
+                }
+
+                override fun onLost(network: android.net.Network) {
+                    super.onLost(network)
+                    println("DEBUG: WiFi connection lost for $ssid")
+                }
+            }
+
+                connectivityManager.requestNetwork(networkRequest, callback)
+                
+                continuation.invokeOnCancellation {
+                    connectivityManager.unregisterNetworkCallback(callback)
+                }
+            } else {
+                // For API levels < 29, return failure indicating manual connection needed
+                if (continuation.isActive) {
+                    continuation.resume(Result.failure(Exception("WiFi connection requires manual setup on Android versions below 10")))
+                }
+            }
+        }
+    }
+
+    /**
+     * Ensures the process is bound to WiFi network for local device discovery
+     */
+    fun ensureWifiBinding() {
+        // First try using stored WiFi network
+        lastWifiNetwork?.let { network ->
+            val networkCaps = connectivityManager.getNetworkCapabilities(network)
+            if (networkCaps?.hasTransport(NetworkCapabilities.TRANSPORT_WIFI) == true) {
+                connectivityManager.bindProcessToNetwork(network)
+                println("DEBUG: Re-bound process to stored WiFi network for discovery")
+                
+                // Verify binding worked
+                val activeNetwork = connectivityManager.activeNetwork
+                val activeCaps = connectivityManager.getNetworkCapabilities(activeNetwork)
+                println("DEBUG: After binding - Active network: $activeNetwork")
+                println("DEBUG: After binding - Network capabilities: $activeCaps")
+                return
+            }
+        }
+        
+        // If stored network is not available, find current WiFi network
+        println("DEBUG: Stored WiFi network not available, searching for current WiFi network...")
+        val allNetworks = connectivityManager.allNetworks
+        for (network in allNetworks) {
+            val networkCaps = connectivityManager.getNetworkCapabilities(network)
+            if (networkCaps?.hasTransport(NetworkCapabilities.TRANSPORT_WIFI) == true) {
+                connectivityManager.bindProcessToNetwork(network)
+                lastWifiNetwork = network
+                println("DEBUG: Found and bound to WiFi network: $network")
+                
+                // Verify binding
+                val activeNetwork = connectivityManager.activeNetwork
+                val activeCaps = connectivityManager.getNetworkCapabilities(activeNetwork)
+                println("DEBUG: After new binding - Active network: $activeNetwork")
+                println("DEBUG: After new binding - Network capabilities: $activeCaps")
+                return
+            }
+        }
+        
+        println("DEBUG: No WiFi network available for binding")
+    }
+
+    /**
+     * Gets current network information for debugging and subnet discovery
+     */
+    fun getCurrentNetworkInfo(): String {
+        return try {
+            val connectivityManager = context.getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager
+            val activeNetwork = connectivityManager.activeNetwork
+            val networkCapabilities = connectivityManager.getNetworkCapabilities(activeNetwork)
+            val linkProperties = connectivityManager.getLinkProperties(activeNetwork)
+            
+            val wifiInfo = wifiManager.connectionInfo
+            
+            var info = "=== NETWORK DEBUG INFO ===\n"
+            info += "Active network: $activeNetwork\n"
+            info += "Network capabilities: $networkCapabilities\n"
+            info += "WiFi SSID: ${wifiInfo?.ssid}\n"
+            info += "WiFi IP: ${formatIpAddress(wifiInfo?.ipAddress ?: 0)}\n"
+            
+            // Get all network interfaces
+            val networkInterfaces = NetworkInterface.getNetworkInterfaces()
+            for (networkInterface in networkInterfaces) {
+                if (networkInterface.isUp && !networkInterface.isLoopback) {
+                    info += "Interface ${networkInterface.name}:\n"
+                    for (inetAddress in networkInterface.inetAddresses) {
+                        if (!inetAddress.isLoopbackAddress && inetAddress.hostAddress.contains(".")) {
+                            info += "  IP: ${inetAddress.hostAddress}\n"
+                        }
+                    }
+                }
+            }
+            
+            info += "Link properties: ${linkProperties?.toString()}\n"
+            info += "========================="
+            
+            println("DEBUG: $info")
+            info
+        } catch (e: Exception) {
+            val error = "Failed to get network info: ${e.message}"
+            println("DEBUG: $error")
+            error
+        }
+    }
+
+    /**
+     * Gets the current WiFi subnet for ESP device discovery using multiple methods
+     */
+    fun getCurrentSubnet(): String? {
+        return try {
+            // Check permissions first
+            checkWifiPermissions()
+            
+            // Method 1: Try WifiManager approach first
+            val wifiSubnet = getWifiSubnetFromWifiManager()
+            if (wifiSubnet != null) {
+                println("DEBUG: WiFi subnet from WifiManager: $wifiSubnet.x")
+                return wifiSubnet
+            }
+            
+            // Method 2: Try NetworkInterface approach as fallback
+            val networkSubnet = getWifiSubnetFromNetworkInterface()
+            if (networkSubnet != null) {
+                println("DEBUG: WiFi subnet from NetworkInterface: $networkSubnet.x")
+                return networkSubnet
+            }
+            
+            // Method 3: Try ConnectivityManager approach
+            val connectivitySubnet = getWifiSubnetFromConnectivity()
+            if (connectivitySubnet != null) {
+                println("DEBUG: WiFi subnet from ConnectivityManager: $connectivitySubnet.x")
+                return connectivitySubnet
+            }
+            
+            println("DEBUG: All WiFi subnet detection methods failed - device may not be connected to WiFi")
+            null
+        } catch (e: Exception) {
+            println("DEBUG: Failed to get current subnet: ${e.message}")
+            null
+        }
+    }
+    
+    /**
+     * Checks if required WiFi permissions are granted
+     */
+    private fun checkWifiPermissions() {
+        val hasWifiPermission = ActivityCompat.checkSelfPermission(
+            context,
+            Manifest.permission.ACCESS_WIFI_STATE
+        ) == PackageManager.PERMISSION_GRANTED
+        
+        val hasLocationPermission = ActivityCompat.checkSelfPermission(
+            context,
+            Manifest.permission.ACCESS_FINE_LOCATION
+        ) == PackageManager.PERMISSION_GRANTED
+        
+        println("DEBUG: WiFi permission: $hasWifiPermission")
+        println("DEBUG: Location permission: $hasLocationPermission")
+        
+        if (!hasWifiPermission) {
+            println("DEBUG: Missing ACCESS_WIFI_STATE permission")
+        }
+        
+        if (!hasLocationPermission && Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            println("DEBUG: Missing ACCESS_FINE_LOCATION permission (required on Android 10+)")
+        }
+    }
+    
+    /**
+     * Method 1: Get WiFi subnet using WifiManager (traditional approach)
+     */
+    private fun getWifiSubnetFromWifiManager(): String? {
+        return try {
+            val wifiInfo = wifiManager.connectionInfo
+            if (wifiInfo == null) {
+                println("DEBUG: WifiInfo is null")
+                return null
+            }
+            
+            val ipAddress = wifiInfo.ipAddress
+            println("DEBUG: Raw WiFi IP from WifiManager: $ipAddress")
+            
+            if (ipAddress == 0) {
+                println("DEBUG: WiFi IP is 0 - not connected to WiFi or permission issue")
+                return null
+            }
+            
+            val formattedIp = formatIpAddress(ipAddress)
+            println("DEBUG: Formatted WiFi IP: $formattedIp")
+            
+            // Validate IP is not localhost or invalid
+            if (formattedIp == "0.0.0.0" || formattedIp.startsWith("127.")) {
+                println("DEBUG: Invalid WiFi IP detected: $formattedIp")
+                return null
+            }
+            
+            val parts = formattedIp.split(".")
+            if (parts.size == 4) {
+                return "${parts[0]}.${parts[1]}.${parts[2]}"
+            }
+            
+            null
+        } catch (e: Exception) {
+            println("DEBUG: WifiManager method failed: ${e.message}")
+            null
+        }
+    }
+    
+    /**
+     * Method 2: Get WiFi subnet using NetworkInterface (works on newer Android versions)
+     */
+    private fun getWifiSubnetFromNetworkInterface(): String? {
+        return try {
+            val networkInterfaces = NetworkInterface.getNetworkInterfaces()
+            for (networkInterface in networkInterfaces) {
+                if (networkInterface.isUp && !networkInterface.isLoopback) {
+                    println("DEBUG: Checking network interface: ${networkInterface.name}")
+                    
+                    // Look for WiFi interfaces (common names)
+                    val interfaceName = networkInterface.name.lowercase()
+                    if (interfaceName.contains("wlan") || interfaceName.contains("wifi")) {
+                        for (inetAddress in networkInterface.inetAddresses) {
+                            if (!inetAddress.isLoopbackAddress && inetAddress.hostAddress.contains(".")) {
+                                val ip = inetAddress.hostAddress
+                                println("DEBUG: Found WiFi interface IP: $ip")
+                                
+                                val parts = ip.split(".")
+                                if (parts.size == 4 && !ip.startsWith("127.")) {
+                                    return "${parts[0]}.${parts[1]}.${parts[2]}"
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            null
+        } catch (e: Exception) {
+            println("DEBUG: NetworkInterface method failed: ${e.message}")
+            null
+        }
+    }
+    
+    /**
+     * Method 3: Get WiFi subnet using ConnectivityManager
+     */
+    private fun getWifiSubnetFromConnectivity(): String? {
+        return try {
+            val connectivityManager = context.getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager
+            val activeNetwork = connectivityManager.activeNetwork
+            val networkCapabilities = connectivityManager.getNetworkCapabilities(activeNetwork)
+            
+            println("DEBUG: Active network: $activeNetwork")
+            println("DEBUG: Network capabilities: $networkCapabilities")
+            
+            // Check if we're actually on WiFi
+            if (networkCapabilities?.hasTransport(NetworkCapabilities.TRANSPORT_WIFI) == true) {
+                val linkProperties = connectivityManager.getLinkProperties(activeNetwork)
+                linkProperties?.linkAddresses?.forEach { linkAddress ->
+                    val address = linkAddress.address.hostAddress
+                    if (address != null && address.contains(".") && !address.startsWith("127.")) {
+                        println("DEBUG: Found WiFi address from ConnectivityManager: $address")
+                        val parts = address.split(".")
+                        if (parts.size == 4) {
+                            return "${parts[0]}.${parts[1]}.${parts[2]}"
+                        }
+                    }
+                }
+            } else {
+                println("DEBUG: Not connected to WiFi network - using cellular or other transport")
+            }
+            
+            null
+        } catch (e: Exception) {
+            println("DEBUG: ConnectivityManager method failed: ${e.message}")
+            null
+        }
+    }
+
+    private fun formatIpAddress(ip: Int): String {
+        return String.format(
+            "%d.%d.%d.%d",
+            ip and 0xff,
+            (ip shr 8) and 0xff,
+            (ip shr 16) and 0xff,
+            (ip shr 24) and 0xff
+        )
+    }
+} 
