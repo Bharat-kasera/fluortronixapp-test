@@ -403,7 +403,7 @@ private fun UnassignedDeviceCard(
     
     Card(
         modifier = Modifier.fillMaxWidth(),
-        colors = CardDefaults.cardColors(containerColor = Color.White),
+        colors = CardDefaults.cardColors(containerColor = Color(0xFFFFFEFE)),
         shape = RoundedCornerShape(12.dp),
         elevation = CardDefaults.cardElevation(defaultElevation = 1.dp)
     ) {
@@ -426,7 +426,8 @@ private fun UnassignedDeviceCard(
                 colors = ButtonDefaults.outlinedButtonColors(
                     contentColor = PrimaryBlue
                 ),
-                shape = RoundedCornerShape(8.dp)
+                shape = RoundedCornerShape(8.dp),
+
             ) {
                 Text("Assign", fontSize = 12.sp)
             }

@@ -1,5 +1,8 @@
 package com.fluortronix.fluortronixapp.presentation.viewmodels
 
+import android.content.ClipData
+import android.content.ClipboardManager
+import android.content.Context
 import android.net.wifi.ScanResult
 import androidx.lifecycle.SavedStateHandle
 import androidx.lifecycle.ViewModel
@@ -11,6 +14,7 @@ import com.fluortronix.fluortronixapp.data.models.Room
 import com.fluortronix.fluortronixapp.data.repository.DeviceRepository
 import com.fluortronix.fluortronixapp.data.repository.RoomRepository
 import dagger.hilt.android.lifecycle.HiltViewModel
+import dagger.hilt.android.qualifiers.ApplicationContext
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -27,7 +31,8 @@ class DeviceOnboardingViewModel @Inject constructor(
     private val espDeviceService: ESPDeviceService,
     private val deviceRepository: DeviceRepository,
     private val roomRepository: RoomRepository,
-    private val savedStateHandle: SavedStateHandle
+    private val savedStateHandle: SavedStateHandle,
+    @ApplicationContext private val context: Context
 ) : ViewModel() {
     private val _scanResults = MutableStateFlow<List<ScanResult>>(emptyList())
     val scanResults: StateFlow<List<ScanResult>> = _scanResults.asStateFlow()
@@ -66,9 +71,17 @@ class DeviceOnboardingViewModel @Inject constructor(
     private val _selectedESPDevice = MutableStateFlow<ScanResult?>(null)
     val selectedESPDevice: StateFlow<ScanResult?> = _selectedESPDevice.asStateFlow()
 
+    // Debug logs for UI display
+    private val _debugLogs = MutableStateFlow<List<String>>(emptyList())
+    val debugLogs: StateFlow<List<String>> = _debugLogs.asStateFlow()
+
+    // Copy status for UI feedback
+    private val _isCopied = MutableStateFlow(false)
+    val isCopied: StateFlow<Boolean> = _isCopied.asStateFlow()
+
     init {
         savedStateHandle.get<String>("ssid")?.let {
-            _ssid.value = it
+            _ssid.value = it // Preserve original input for display
             // Also check if this is an ESP device SSID from navigation
             if (it.startsWith("FLUO-")) {
                 _selectedEspDeviceSSID.value = it
@@ -89,20 +102,101 @@ class DeviceOnboardingViewModel @Inject constructor(
         }
     }
 
+    /**
+     * Add debug log to both console and UI
+     */
+    private fun addDebugLog(message: String) {
+        println("DEBUG: $message") // Keep console logging
+        
+        val timestamp = java.text.SimpleDateFormat("HH:mm:ss", java.util.Locale.getDefault())
+            .format(java.util.Date())
+        val logMessage = "[$timestamp] $message"
+        
+        val currentLogs = _debugLogs.value.toMutableList()
+        currentLogs.add(logMessage)
+        
+        // Keep only last 20 logs to prevent memory issues
+        if (currentLogs.size > 20) {
+            currentLogs.removeAt(0)
+        }
+        
+        _debugLogs.value = currentLogs
+    }
+
+    /**
+     * Clear debug logs 
+     */
+    fun clearDebugLogs() {
+        _debugLogs.value = emptyList()
+        _isCopied.value = false
+    }
+
+    /**
+     * Copy all debug logs to clipboard in formatted text
+     */
+    fun copyDebugLogs() {
+        try {
+            val logs = _debugLogs.value
+            if (logs.isEmpty()) {
+                return
+            }
+
+            val clipboardManager = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+            
+            // Format logs nicely for sharing
+            val formattedLogs = buildString {
+                appendLine("=== FluorTronix Debug Logs ===")
+                appendLine("Generated: ${java.text.SimpleDateFormat("yyyy-MM-dd HH:mm:ss", java.util.Locale.getDefault()).format(java.util.Date())}")
+                appendLine("Device: ${android.os.Build.MODEL} (${android.os.Build.VERSION.RELEASE})")
+                appendLine("App Version: FluorTronix Android")
+                appendLine("================================")
+                appendLine()
+                
+                logs.forEach { log ->
+                    appendLine(log)
+                }
+                
+                appendLine()
+                appendLine("=== End Debug Logs ===")
+            }
+
+            val clipData = ClipData.newPlainText("FluorTronix Debug Logs", formattedLogs)
+            clipboardManager.setPrimaryClip(clipData)
+            
+            // Show copied feedback
+            _isCopied.value = true
+            
+            // Reset copy feedback after 2 seconds
+            viewModelScope.launch {
+                delay(2000)
+                _isCopied.value = false
+            }
+            
+        } catch (e: Exception) {
+            addDebugLog("❌ Failed to copy logs: ${e.message}")
+        }
+    }
+
     fun onSsidChange(ssid: String) {
-        _ssid.value = ssid
+        _ssid.value = ssid // Allow spaces during typing
     }
 
     fun onPasswordChange(password: String) {
-        _password.value = password
+        _password.value = password // Allow spaces during typing
     }
 
     fun provisionDevice() {
         viewModelScope.launch {
             try {
+                clearDebugLogs() // Clear previous logs
                 _provisioningState.value = ProvisioningState.ConnectingToDevice
-                println("DEBUG: Starting provisioning - Target SSID: ${ssid.value}")
-                println("DEBUG: Selected ESP Device SSID: ${_selectedEspDeviceSSID.value}")
+                
+                // Trim trailing spaces from credentials before using them
+                val trimmedSSID = ssid.value.trimEnd()
+                val trimmedPassword = password.value.trimEnd()
+                
+                addDebugLog("Starting provisioning - Target SSID: '$trimmedSSID'")
+                addDebugLog("Selected ESP Device SSID: ${_selectedEspDeviceSSID.value}")
 
                 // Ensure we're connected to the ESP device's access point
                 val espSSID = if (_selectedEspDeviceSSID.value.isNotEmpty()) {
@@ -112,43 +206,43 @@ class DeviceOnboardingViewModel @Inject constructor(
                     "FLUO-Setup"
                 }
                 
-                println("DEBUG: Ensuring connection to ESP access point: $espSSID")
+                addDebugLog("Ensuring connection to ESP access point: $espSSID")
                 val espConnectionResult = wifiService.connectToWifiAsync(espSSID, "12345678", isEspDevice = true)
                 
                 if (!espConnectionResult.isSuccess) {
                     val error = espConnectionResult.exceptionOrNull()?.message ?: "Failed to connect to ESP device"
-                    println("DEBUG: Failed to connect to ESP device: $error")
+                    addDebugLog("❌ Failed to connect to ESP device: $error")
                     _provisioningState.value = ProvisioningState.Failure("Failed to connect to ESP device: $error")
                     return@launch
                 }
                 
-                println("DEBUG: Successfully connected to ESP device: $espSSID")
+                addDebugLog("✅ Successfully connected to ESP device: $espSSID")
                 // Small delay to ensure connection is stable
                 delay(1000)
 
                 _provisioningState.value = ProvisioningState.SendingCredentials
-                println("DEBUG: Sending credentials to ESP8266...")
+                addDebugLog("Sending credentials to ESP8266...")
                 
                 // Important: Send credentials immediately while still connected to ESP AP
-                val result = espDeviceService.provisionDevice(ssid.value, password.value)
-                println("DEBUG: Provisioning result: ${result.isSuccess}, ${result.exceptionOrNull()?.message}")
+                val result = espDeviceService.provisionDevice(trimmedSSID, trimmedPassword)
+                addDebugLog("Provisioning result: ${result.isSuccess}, ${result.exceptionOrNull()?.message}")
 
             if (result.isSuccess) {
-                    println("DEBUG: Credentials sent successfully, ESP8266 will now switch networks")
+                    addDebugLog("✅ Credentials sent successfully, ESP will switch networks")
                     
                     // After successful provisioning, the device will disconnect and connect to the new network.
                     // We need to switch back to that network and wait for the device to come online.
-                    println("DEBUG: Switching phone back to target WiFi network...")
-                    val targetConnectionResult = wifiService.connectToWifiAsync(ssid.value, password.value, isEspDevice = false)
+                    addDebugLog("Switching phone back to target WiFi network...")
+                    val targetConnectionResult = wifiService.connectToWifiAsync(trimmedSSID, trimmedPassword, isEspDevice = false)
                     
                     if (!targetConnectionResult.isSuccess) {
                         val error = targetConnectionResult.exceptionOrNull()?.message ?: "Failed to connect to target WiFi"
-                        println("DEBUG: Failed to connect to target WiFi: $error")
+                        addDebugLog("❌ Failed to connect to target WiFi: $error")
                         _provisioningState.value = ProvisioningState.Failure("Failed to connect to target WiFi: $error")
                         return@launch
                     }
                     
-                    println("DEBUG: Successfully connected to target WiFi: ${ssid.value}")
+                    addDebugLog("✅ Successfully connected to target WiFi: ${ssid.value}")
                     
                     // Give time for the ESP8266 to complete its transition:
                     // - Stop SoftAP server
@@ -156,11 +250,11 @@ class DeviceOnboardingViewModel @Inject constructor(
                     // - Connect to new WiFi (up to 20 seconds)
                     // - Start web server
                     // Reduced wait time since we have optimized parallel discovery
-                    println("DEBUG: Waiting 20 seconds for ESP device to complete network transition...")
+                    addDebugLog("⏳ Waiting 20 seconds for ESP device to complete network transition...")
                     delay(20000) 
                     
                     _provisioningState.value = ProvisioningState.DiscoveringDevice
-                    println("DEBUG: Starting device discovery on new network...")
+                    addDebugLog("🔍 Starting device discovery on new network...")
 
                     // Debug current network state before discovery
                     wifiService.getCurrentNetworkInfo()
@@ -178,12 +272,12 @@ class DeviceOnboardingViewModel @Inject constructor(
                     
                     do {
                         discoveryAttempts++
-                        println("DEBUG: Device discovery attempt $discoveryAttempts/$maxDiscoveryAttempts")
+                        addDebugLog("🔍 Device discovery attempt $discoveryAttempts/$maxDiscoveryAttempts")
                         
                         discoveryResult = espDeviceService.discoverProvisionedDevice(_selectedEspDeviceSSID.value)
                         
                         if (!discoveryResult.isSuccess && discoveryAttempts < maxDiscoveryAttempts) {
-                            println("DEBUG: Discovery attempt $discoveryAttempts failed, waiting 5 seconds before retry...")
+                            addDebugLog("⏳ Discovery attempt $discoveryAttempts failed, waiting 5 seconds before retry...")
                             delay(5000)
                             // Re-ensure WiFi binding before retry
                             wifiService.ensureWifiBinding()
@@ -197,20 +291,21 @@ class DeviceOnboardingViewModel @Inject constructor(
                             deviceRepository.addDevice(discoveredDevice)
                             _newDevice.value = discoveredDevice
                             _provisioningState.value = ProvisioningState.Success
-                            println("DEBUG: Device discovered and saved successfully!")
+                            addDebugLog("✅ Device discovered and saved successfully!")
                         } else {
+                            addDebugLog("❌ Device discovery returned null result")
                             _provisioningState.value = ProvisioningState.Failure("Device discovery returned null result")
                         }
                     } else {
-                        println("DEBUG: Device discovery failed: ${discoveryResult.exceptionOrNull()?.message}")
+                        addDebugLog("❌ Device discovery failed: ${discoveryResult.exceptionOrNull()?.message}")
                         _provisioningState.value = ProvisioningState.Failure("Could not find device on network. Please ensure both phone and device are connected to the same WiFi. Error: ${discoveryResult.exceptionOrNull()?.message}")
                     }
                 } else {
-                    println("DEBUG: Failed to send credentials: ${result.exceptionOrNull()?.message}")
+                    addDebugLog("❌ Failed to send credentials: ${result.exceptionOrNull()?.message}")
                     _provisioningState.value = ProvisioningState.Failure(result.exceptionOrNull()?.message ?: "Unknown error")
                 }
             } catch (e: Exception) {
-                println("DEBUG: Exception in provisionDevice: ${e.message}")
+                addDebugLog("❌ Exception in provisionDevice: ${e.message}")
                 e.printStackTrace()
                 _provisioningState.value = ProvisioningState.Failure("Error: ${e.message}")
             }

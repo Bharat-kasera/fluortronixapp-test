@@ -41,7 +41,7 @@ fun DeviceCard(
 
         ,
         colors = CardDefaults.cardColors(
-            containerColor = Color.White
+            containerColor = Color(0xFFFFFEFE)
         ),
         elevation = CardDefaults.cardElevation(
             defaultElevation = 2.dp

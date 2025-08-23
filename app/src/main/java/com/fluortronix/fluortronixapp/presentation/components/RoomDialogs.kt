@@ -131,7 +131,7 @@ private fun AddRoomDialogContent(
                     if (nameError != null) validateName()
                 },
                 label = { Text("Room Name") },
-                placeholder = { Text("e.g., Living Room, Bedroom") },
+                placeholder = { Text(" ") },
                 modifier = Modifier.fillMaxWidth(),
                 enabled = !isCreating,
                 isError = nameError != null,
@@ -680,7 +680,7 @@ private fun DeviceSelectionItem(
                 )
             )
 
-            Spacer(modifier = Modifier.width(12.dp))
+            Spacer(modifier = Modifier.width(8.dp))
 
             Column(
                 modifier = Modifier.weight(1f)
@@ -698,7 +698,7 @@ private fun DeviceSelectionItem(
                     color = if (isEnabled) Color.Gray else Color.LightGray
                 )
             }
-
+            Spacer(modifier = Modifier.width(5.dp))
             // Online indicator
             Box(
                 modifier = Modifier

@@ -7,9 +7,11 @@
  * - Automated scheduling/routines with time sync
  * - EEPROM storage for settings and routines
  * - PWM control of LED channels
+ * - Triple reset detection for factory reset (3x reset in 20 seconds)
  * 
  * Hardware: ESP8266 with 6 PWM outputs for LED drivers
  * API Base: /api/device/ and /api/routines/
+ * Troubleshooting: Press reset button 3 times within 20 seconds to clear all data
  */
 
 #include <ESP8266WiFi.h>
@@ -58,8 +60,20 @@ unsigned long lastRoutineCheck = 0;       // Prevents routine spam-execution
 // 0-255:     WiFi credentials (256 bytes)
 // 256-447:   Slider names (192 bytes = 6 channels × 32 bytes)
 // 448+:      Routines (variable size based on routine count)
+// 2040-2047: Triple reset detection (8 bytes)
 const int ROUTINE_EEPROM_START = 448;
 const int ROUTINE_SIZE = sizeof(ESPRoutine);
+const int TRIPLE_RESET_EEPROM_START = 2040;
+
+// Triple Reset Detection
+struct TripleResetData {
+  uint8_t resetCount;
+  uint32_t lastResetTime; // Store actual epoch time, not millis()
+  uint8_t magicNumber; // To validate data integrity
+};
+const uint8_t TRIPLE_RESET_MAGIC = 0xAB;
+const unsigned long TRIPLE_RESET_TIMEOUT = 20; // 20 seconds
+const uint8_t TRIPLE_RESET_THRESHOLD = 3;
 
 // Time Management
 unsigned long deviceStartTime = 0;
@@ -85,9 +99,14 @@ const char* AP_PASSWORD = "12345678";
  */
 void setup() {
   Serial.begin(115200);
-  delay(1000);
+  delay(2000); // Longer delay for Mac serial monitor
   
-  Serial.println("\n=== FluorTronix ESP8266 Test Device ===");
+  // Clear any boot garbage with newlines
+  Serial.println();
+  Serial.println();
+  Serial.println();
+  Serial.println("==========================================");
+  Serial.println("=== FluorTronix ESP8266 Test Device ===");
   Serial.println("Device Model: " + deviceModel);
   
   // Create unique AP SSID using last 6 digits of MAC address
@@ -113,6 +132,9 @@ void setup() {
   } else {
     Serial.println("SPIFFS initialized successfully");
   }
+  
+  // Check for triple reset detection (must be done before loading WiFi credentials)
+  checkTripleResetDetection();
   
   // Configure NTP for IST timezone (+5:30 = 19800 seconds offset)
   deviceStartTime = millis();
@@ -331,6 +353,11 @@ void setupAPIRoutes() {
       html += " (" + String(loadedRoutines[i].isOffRoutine ? "OFF" : "PRESET") + ")";
       html += " [" + String(loadedRoutines[i].isEnabled ? "ENABLED" : "DISABLED") + "]</p>";
     }
+    html += "<h3>Troubleshooting:</h3>";
+    html += "<p><strong>Triple Reset to Clear Data:</strong></p>";
+    html += "<p>Press the reset button 3 times within 20 seconds to clear all stored data</p>";
+    html += "<p>This will erase WiFi credentials, routines, and settings</p>";
+    html += "<p>Device will restart in SoftAP mode for fresh provisioning</p>";
     html += "<h3>API Endpoints:</h3>";
     html += "<p><a href='/api/device/info'>Device Info JSON</a></p>";
     html += "<p><a href='/api/routines'>Routines JSON</a></p>";
@@ -939,6 +966,117 @@ void loadWiFiCredentials() {
     savedPassword = "";
   }
 } 
+
+
+void checkTripleResetDetection() {
+  rst_info* resetInfo = ESP.getResetInfoPtr();
+  
+  // Only count manual resets (external reset button presses)
+  bool isManualReset = (resetInfo->reason == REASON_EXT_SYS_RST);
+  
+  // Read reset data using individual bytes (more reliable on ESP8266)
+  uint8_t magicByte = EEPROM.read(TRIPLE_RESET_EEPROM_START);
+  uint8_t resetCount = EEPROM.read(TRIPLE_RESET_EEPROM_START + 1);
+  
+  if (magicByte != TRIPLE_RESET_MAGIC) {
+    resetCount = 0;
+    EEPROM.write(TRIPLE_RESET_EEPROM_START, TRIPLE_RESET_MAGIC);
+    EEPROM.write(TRIPLE_RESET_EEPROM_START + 1, 0);
+    EEPROM.commit();
+  }
+  
+  if (isManualReset) {
+    // Increment reset counter for manual resets
+    resetCount++;
+    
+    // Save incremented count immediately
+    EEPROM.write(TRIPLE_RESET_EEPROM_START + 1, resetCount);
+    EEPROM.commit();
+    
+    // Check if we've reached the threshold
+    if (resetCount >= TRIPLE_RESET_THRESHOLD) {
+      Serial.println();
+      Serial.println("🔥🔥🔥 TRIPLE RESET DETECTED! 🔥🔥🔥");
+      Serial.println("CLEARING ALL DEVICE DATA...");
+      Serial.println();
+      
+      // Clear the reset counter first to prevent loops
+      EEPROM.write(TRIPLE_RESET_EEPROM_START, 0);     // Clear magic
+      EEPROM.write(TRIPLE_RESET_EEPROM_START + 1, 0); // Clear count
+      EEPROM.commit();
+      
+      // Now clear all device data
+      clearAllDeviceData();
+      
+      Serial.println("=== FACTORY RESET COMPLETE ===");
+      Serial.println("✅ All data has been cleared successfully!");
+      Serial.println("📱 Device will now start in SoftAP mode for fresh setup");
+      Serial.println("🔌 You can now provision the device again through the app");
+      Serial.println("===============================");
+      
+      // Give user time to see the message, then restart fresh
+      delay(5000);
+      ESP.restart();
+      return;
+    }
+  } else {
+    // Any non-manual reset clears the counter
+    if (resetCount > 0) {
+      EEPROM.write(TRIPLE_RESET_EEPROM_START + 1, 0);
+      EEPROM.commit();
+    }
+  }
+}
+
+/*
+ * Clear all stored device data for factory reset
+ * Erases WiFi credentials, routines, slider names, and reset detection data
+ */
+void clearAllDeviceData() {
+  Serial.println("=== CLEARING ALL DEVICE DATA ===");
+  
+  // Clear entire EEPROM (2048 bytes)
+  Serial.println("Erasing EEPROM...");
+  for (int i = 0; i < 2048; i++) {
+    EEPROM.write(i, 0);
+  }
+  EEPROM.commit();
+  
+  // Clear SPIFFS file system
+  Serial.println("Formatting SPIFFS...");
+  if (SPIFFS.format()) {
+    Serial.println("SPIFFS formatted successfully");
+  } else {
+    Serial.println("SPIFFS format failed");
+  }
+  
+  // Reset runtime variables to defaults
+  Serial.println("Resetting runtime variables...");
+  savedSSID = "";
+  savedPassword = "";
+  routineCount = 0;
+  isDeviceOn = false;
+  
+  // Reset all slider values and names to defaults
+  for (int i = 0; i < NUM_SLIDERS; i++) {
+    sliderValues[i] = 0;
+    previousSliderValues[i] = 0;
+    sliderNames[i] = "Channel " + String(i + 1);
+    analogWrite(LED_PINS[i], 0); // Turn off all LEDs
+  }
+  
+  // Clear all routine data
+  memset(loadedRoutines, 0, sizeof(loadedRoutines));
+  
+  Serial.println("=== DATA CLEAR COMPLETED ===");
+  Serial.println("✓ WiFi credentials cleared");
+  Serial.println("✓ Routines cleared");
+  Serial.println("✓ Slider names reset to defaults");
+  Serial.println("✓ Device state reset");
+  Serial.println("✓ SPIFFS formatted");
+  Serial.println("✓ EEPROM erased");
+  Serial.println("============================");
+}
 
 /*
  * ===== ROUTINE MANAGEMENT FUNCTIONS =====
