@@ -43,14 +43,26 @@ fun BottomNavigationBar(
     // Get screen width for responsive sizing
     val configuration = LocalConfiguration.current
     val screenWidthDp = configuration.screenWidthDp
-    val itemSize = if (screenWidthDp < 400) 57.dp else 59.dp //navigation bar size
-    val iconSize = if (itemSize == 48.dp) 24.dp else 28.dp
+    
+    // Calculate responsive dimensions
+    val itemSize = if (screenWidthDp < 400) 55.dp else 59.dp //navigation bar size
+    val iconSize = if (screenWidthDp < 400) 24.dp else 28.dp
+    
+    // Calculate responsive horizontal padding to ensure all items fit
+    val totalItemsWidth = itemSize * 4 // 4 navigation items
+    val totalSpacing = 8.dp * 3 // 3 gaps between 4 items
+    val rowPadding = 16.dp // horizontal padding inside Row
+    val minRequiredWidth = totalItemsWidth + totalSpacing + rowPadding
+    val availableWidth = screenWidthDp.dp
+    val maxHorizontalPadding = 62.dp
+    val minHorizontalPadding = 16.dp
+    val horizontalPadding = ((availableWidth - minRequiredWidth) / 2).coerceIn(minHorizontalPadding, maxHorizontalPadding)
 
     Box(
         modifier = modifier
             .navigationBarsPadding()
             .fillMaxWidth()
-            .padding(vertical = 8.dp, horizontal = 62.dp),
+            .padding(vertical = 8.dp, horizontal = horizontalPadding),
         contentAlignment = Alignment.Center
     ) {
         Row(

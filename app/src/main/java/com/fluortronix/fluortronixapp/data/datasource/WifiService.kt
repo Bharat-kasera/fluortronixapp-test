@@ -105,124 +105,39 @@ class WifiService @Inject constructor(
         return suspendCancellableCoroutine { continuation ->
             if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.Q) {
                 
-                // For target WiFi networks (not ESP), find and switch to existing saved network
+                // For target WiFi networks (not ESP), use enhanced automatic reconnection
                 if (!isEspDevice) {
-                    println("DEBUG: 🔄 Switching back to saved WiFi network '$ssid'")
+                    println("DEBUG: Using enhanced automatic WiFi reconnection to '$ssid'")
                     
                     GlobalScope.launch {
                         try {
-                            // First, clear ESP binding to restore normal WiFi management
+                            // Step 1: Clear ESP binding to restore normal WiFi management
                             connectivityManager.bindProcessToNetwork(null)
-                            println("DEBUG: ✅ Cleared ESP binding")
+                            println("DEBUG: Cleared ESP binding")
+                            delay(1000)
                             
-                            // Give Android a moment to process the binding change
-                            delay(1500)
-                            
-                            // Strategy 1: Look for existing saved WiFi network that matches target SSID
-                            val allNetworks = connectivityManager.allNetworks
-                            var targetSavedNetwork: android.net.Network? = null
-                            
-                            for (network in allNetworks) {
-                                try {
-                                    val networkCaps = connectivityManager.getNetworkCapabilities(network)
-                                    if (networkCaps?.hasTransport(NetworkCapabilities.TRANSPORT_WIFI) == true) {
-                                        
-                                        // Check if this network is validated and not ephemeral
-                                        val isValidated = networkCaps.hasCapability(NetworkCapabilities.NET_CAPABILITY_VALIDATED)
-                                        val isEphemeral = networkCaps.transportInfo?.toString()?.contains("Ephemeral: true") == true
-                                        
-                                        println("DEBUG: Checking network $network - Validated: $isValidated, Ephemeral: $isEphemeral")
-                                        
-                                        // Prefer validated, non-ephemeral networks (these are saved networks)
-                                        if (isValidated && !isEphemeral) {
-                                            targetSavedNetwork = network
-                                            println("DEBUG: ✅ Found saved WiFi network: $network")
-                                            break
-                                        }
-                                    }
-                                } catch (e: Exception) {
-                                    println("DEBUG: Error checking network $network: ${e.message}")
-                                }
+                            // Step 2: Force WiFi scan to refresh available networks
+                            try {
+                                wifiManager.startScan()
+                                println("DEBUG: Triggered WiFi scan")
+                                delay(2000) // Wait for scan to complete
+                            } catch (e: Exception) {
+                                println("DEBUG: WiFi scan failed: ${e.message}")
                             }
                             
-                            // If we found a saved network, bind to it
-                            if (targetSavedNetwork != null) {
-                                try {
-                                    connectivityManager.bindProcessToNetwork(targetSavedNetwork)
-                                    lastWifiNetwork = targetSavedNetwork
-                                    println("DEBUG: 🎉 Successfully bound to saved WiFi network!")
-                                    
-                                    // Verify the connection by checking SSID
-                                    delay(1000) // Brief delay for connection to stabilize
-                                    val currentWifiInfo = wifiManager.connectionInfo
-                                    val currentSSID = currentWifiInfo?.ssid?.replace("\"", "")
-                                    
-                                    if (currentSSID == ssid) {
-                                        println("DEBUG: ✅ Confirmed connection to '$ssid' using saved network")
-                                        if (continuation.isActive) {
-                                            continuation.resume(Result.success(targetSavedNetwork))
-                                        }
-                                        return@launch
-                                    } else {
-                                        println("DEBUG: ⚠️ Connected to saved network but wrong SSID: '$currentSSID' vs '$ssid'")
-                                    }
-                                } catch (e: Exception) {
-                                    println("DEBUG: Failed to bind to saved network: ${e.message}")
-                                }
-                            }
+                            // Step 3: Check if we're already connected to target network
+                            val currentWifiInfo = wifiManager.connectionInfo
+                            val currentSSID = currentWifiInfo?.ssid?.replace("\"", "")
+                            val currentIP = formatIpAddress(currentWifiInfo?.ipAddress ?: 0)
                             
-                            // Strategy 2: Wait for Android to automatically reconnect
-                            println("DEBUG: 🔄 Waiting for Android to automatically reconnect to '$ssid'...")
-                            var attemptCount = 0
-                            val maxAttempts = 8 // 8 seconds
+                            println("DEBUG: Current connection - SSID: '$currentSSID', IP: $currentIP")
                             
-                            while (attemptCount < maxAttempts) {
-                                delay(1000)
-                                attemptCount++
+                            if (currentSSID == ssid && currentIP != "0.0.0.0") {
+                                println("DEBUG: Already connected to target network - using existing connection")
                                 
-                                val currentWifiInfo = wifiManager.connectionInfo
-                                val currentSSID = currentWifiInfo?.ssid?.replace("\"", "")
-                                
-                                println("DEBUG: Auto-reconnect check $attemptCount/$maxAttempts - Current: '$currentSSID', Target: '$ssid'")
-                                
-                                if (currentSSID == ssid) {
-                                    println("DEBUG: 🎉 Android automatically reconnected to '$ssid'!")
-                                    
-                                    // Find and bind to the current WiFi network
-                                    val currentNetworks = connectivityManager.allNetworks
-                                    for (network in currentNetworks) {
-                                        val networkCaps = connectivityManager.getNetworkCapabilities(network)
-                                        if (networkCaps?.hasTransport(NetworkCapabilities.TRANSPORT_WIFI) == true &&
-                                            networkCaps.hasCapability(NetworkCapabilities.NET_CAPABILITY_VALIDATED)) {
-                                            
-                                            lastWifiNetwork = network
-                                            println("DEBUG: ✅ Using auto-reconnected network: $network")
-                                            
-                                            if (continuation.isActive) {
-                                                continuation.resume(Result.success(network))
-                                            }
-                                            return@launch
-                                        }
-                                    }
-                                }
-                            }
-                            
-                            // Strategy 3: Final verification - check if we're actually connected to target SSID
-                            println("DEBUG: ⚠️ Automatic methods failed - performing final SSID verification...")
-                            delay(1000) // Give one more second for potential connection
-                            
-                            val finalWifiInfo = wifiManager.connectionInfo
-                            val finalSSID = finalWifiInfo?.ssid?.replace("\"", "")
-                            val finalIP = formatIpAddress(finalWifiInfo?.ipAddress ?: 0)
-                            
-                            println("DEBUG: Final verification - SSID: '$finalSSID', IP: $finalIP, Target: '$ssid'")
-                            
-                            if (finalSSID == ssid && finalIP != "0.0.0.0") {
-                                println("DEBUG: ✅ Final verification SUCCESS - connected to '$ssid' with IP $finalIP")
-                                
-                                // Find the actual network for this connection
-                                val verifiedNetworks = connectivityManager.allNetworks
-                                for (network in verifiedNetworks) {
+                                // Find the current network object
+                                val allNetworks = connectivityManager.allNetworks
+                                for (network in allNetworks) {
                                     val caps = connectivityManager.getNetworkCapabilities(network)
                                     if (caps?.hasTransport(NetworkCapabilities.TRANSPORT_WIFI) == true) {
                                         lastWifiNetwork = network
@@ -234,18 +149,157 @@ class WifiService @Inject constructor(
                                 }
                             }
                             
-                            // If we get here, automatic reconnection completely failed
-                            println("DEBUG: ❌ AUTOMATIC RECONNECTION FAILED")
-                            println("DEBUG: Current SSID: '$finalSSID', Target: '$ssid', IP: $finalIP")
+                            // Step 4: Use WifiNetworkSpecifier to "kick" Android into connecting to home WiFi
+                            println("DEBUG: Using WifiNetworkSpecifier to trigger reconnection...")
                             
-                            if (continuation.isActive) {
-                                continuation.resume(Result.failure(Exception("Automatic WiFi reconnection failed - need manual connection to '$ssid'")))
+                            val specifier = WifiNetworkSpecifier.Builder()
+                                .setSsid(ssid)
+                                .setWpa2Passphrase(pass)
+                                .build()
+
+                            val networkRequest = NetworkRequest.Builder()
+                                .addTransportType(NetworkCapabilities.TRANSPORT_WIFI)
+                                .setNetworkSpecifier(specifier)
+                                .build()
+
+                            var temporaryCallback: ConnectivityManager.NetworkCallback? = null
+                            
+                            temporaryCallback = object : ConnectivityManager.NetworkCallback() {
+                                override fun onAvailable(network: android.net.Network) {
+                                    super.onAvailable(network)
+                                    println("DEBUG: WifiNetworkSpecifier connected to '$ssid'")
+                                    
+                                    GlobalScope.launch {
+                                        try {
+                                            // Brief delay to ensure connection is stable
+                                            delay(2000)
+                                            
+                                            // Now clear this ephemeral connection to let Android use saved network
+                                            connectivityManager.bindProcessToNetwork(null)
+                                            println("DEBUG: Cleared ephemeral connection - Android should use saved network")
+                                            
+                                            // Unregister this temporary callback
+                                            temporaryCallback?.let { connectivityManager.unregisterNetworkCallback(it) }
+                                            
+                                            // Wait longer for transition to saved network
+                                            delay(4000)
+                                            
+                                            // Multi-attempt verification with retries
+                                            var verificationAttempts = 0
+                                            val maxVerificationAttempts = 3
+                                            var finalNetwork: android.net.Network? = null
+                                            
+                                            while (verificationAttempts < maxVerificationAttempts && finalNetwork == null) {
+                                                verificationAttempts++
+                                                
+                                                val finalWifiInfo = wifiManager.connectionInfo
+                                                val finalSSID = finalWifiInfo?.ssid?.replace("\"", "")
+                                                val finalIP = formatIpAddress(finalWifiInfo?.ipAddress ?: 0)
+                                                
+                                                println("DEBUG: Verification attempt $verificationAttempts/$maxVerificationAttempts - SSID: '$finalSSID', IP: $finalIP")
+                                                
+                                                if (finalSSID == ssid && finalIP != "0.0.0.0") {
+                                                    println("DEBUG: Verification successful on attempt $verificationAttempts!")
+                                                    
+                                                    // Find the current network (should be saved, not ephemeral)
+                                                    val finalNetworks = connectivityManager.allNetworks
+                                                    for (network in finalNetworks) {
+                                                        val finalCaps = connectivityManager.getNetworkCapabilities(network)
+                                                        if (finalCaps?.hasTransport(NetworkCapabilities.TRANSPORT_WIFI) == true) {
+                                                            val isEphemeral = finalCaps.transportInfo?.toString()?.contains("Ephemeral: true") == true
+                                                            println("DEBUG: Found WiFi network $network (Ephemeral: $isEphemeral)")
+                                                            
+                                                            // Prefer non-ephemeral networks (saved networks)
+                                                            if (!isEphemeral || finalNetwork == null) {
+                                                                finalNetwork = network
+                                                                lastWifiNetwork = network
+                                                                println("DEBUG: Using network $network for final connection")
+                                                                
+                                                                if (!isEphemeral) {
+                                                                    break // Found saved network, stop searching
+                                                                }
+                                                            }
+                                                        }
+                                                    }
+                                                    
+                                                    if (finalNetwork != null) {
+                                                        break // Successful verification with network
+                                                    }
+                                                } else {
+                                                    println("DEBUG: Verification attempt $verificationAttempts failed, waiting 2 seconds...")
+                                                    if (verificationAttempts < maxVerificationAttempts) {
+                                                        delay(2000) // Wait 2 seconds before retry
+                                                    }
+                                                }
+                                            }
+                                            
+                                            if (finalNetwork != null) {
+                                                println("DEBUG: Enhanced automatic WiFi reconnection completed successfully!")
+                                                println("DEBUG: Transitioned to saved network after ${verificationAttempts} verification attempts")
+                                                
+                                                if (continuation.isActive) {
+                                                    continuation.resume(Result.success(finalNetwork))
+                                                }
+                                            } else {
+                                                println("DEBUG: Verification failed after $maxVerificationAttempts attempts")
+                                                println("DEBUG: Connection might still be in progress - device discovery will verify")
+                                                
+                                                // Don't fail completely - let device discovery verify the connection
+                                                val fallbackNetworks = connectivityManager.allNetworks
+                                                for (network in fallbackNetworks) {
+                                                    val caps = connectivityManager.getNetworkCapabilities(network)
+                                                    if (caps?.hasTransport(NetworkCapabilities.TRANSPORT_WIFI) == true) {
+                                                        lastWifiNetwork = network
+                                                        println("DEBUG: Using fallback network $network - will verify via device discovery")
+                                                        
+                                                        if (continuation.isActive) {
+                                                            continuation.resume(Result.success(network))
+                                                        }
+                                                        return@launch
+                                                    }
+                                                }
+                                                
+                                                // If we get here, something is really wrong
+                                                if (continuation.isActive) {
+                                                    continuation.resume(Result.failure(Exception("No WiFi networks available after reconnection attempts")))
+                                                }
+                                            }
+                                            
+                                        } catch (e: Exception) {
+                                            println("DEBUG: Error in transition process: ${e.message}")
+                                            if (continuation.isActive) {
+                                                continuation.resume(Result.failure(Exception("WiFi transition failed: ${e.message}")))
+                                            }
+                                        }
+                                    }
+                                }
+
+                                override fun onUnavailable() {
+                                    super.onUnavailable()
+                                    println("DEBUG: WifiNetworkSpecifier connection failed")
+                                    if (continuation.isActive) {
+                                        continuation.resume(Result.failure(Exception("WifiNetworkSpecifier connection to '$ssid' failed")))
+                                    }
+                                }
+                            }
+
+                            // Request the network with timeout
+                            connectivityManager.requestNetwork(networkRequest, temporaryCallback)
+                            
+                            // Set a timeout for the entire process (longer due to verification retries)
+                            GlobalScope.launch {
+                                delay(20000) // 20-second timeout to account for verification retries
+                                if (continuation.isActive) {
+                                    println("DEBUG: Enhanced WiFi reconnection timeout after 20 seconds")
+                                    temporaryCallback?.let { connectivityManager.unregisterNetworkCallback(it) }
+                                    continuation.resume(Result.failure(Exception("Enhanced WiFi reconnection timeout - please connect manually to '$ssid'")))
+                                }
                             }
                             
                         } catch (e: Exception) {
-                            println("DEBUG: Exception in automatic WiFi reconnection: ${e.message}")
+                            println("DEBUG: Exception in enhanced WiFi reconnection: ${e.message}")
                             if (continuation.isActive) {
-                                continuation.resume(Result.failure(Exception("WiFi reconnection failed: ${e.message}")))
+                                continuation.resume(Result.failure(Exception("Enhanced WiFi reconnection failed: ${e.message}")))
                             }
                         }
                     }
@@ -412,9 +466,9 @@ class WifiService @Inject constructor(
             val intent = android.content.Intent(android.provider.Settings.ACTION_WIFI_SETTINGS)
             intent.flags = android.content.Intent.FLAG_ACTIVITY_NEW_TASK
             context.startActivity(intent)
-            println("DEBUG: ✅ Opened WiFi settings for manual connection")
+            println("DEBUG: Opened WiFi settings for manual connection")
         } catch (e: Exception) {
-            println("DEBUG: ❌ Failed to open WiFi settings: ${e.message}")
+            println("DEBUG: Failed to open WiFi settings: ${e.message}")
         }
     }
     
