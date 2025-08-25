@@ -249,9 +249,9 @@ class DeviceOnboardingViewModel @Inject constructor(
                     // - Switch to Station mode  
                     // - Connect to new WiFi (up to 20 seconds)
                     // - Start web server
-                    // Extended wait time to ensure ESP web server is fully ready
-                    addDebugLog("⏳ Waiting 30 seconds for ESP device to complete network transition...")
-                    delay(30000) 
+                    // Optimized wait time for ESP web server to be ready
+                    addDebugLog("⏳ Waiting 20 seconds for ESP device to complete network transition...")
+                    delay(20000) 
                     
                     _provisioningState.value = ProvisioningState.DiscoveringDevice
                     addDebugLog("🔍 Starting device discovery on new network...")

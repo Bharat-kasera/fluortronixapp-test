@@ -175,44 +175,124 @@ class WifiService @Inject constructor(
 
     /**
      * Ensures the process is bound to WiFi network for local device discovery
+     * Enhanced to handle dual-transport scenarios (WiFi + Cellular)
      */
     fun ensureWifiBinding() {
-        // First try using stored WiFi network
+        println("DEBUG: Starting WiFi binding process...")
+        
+        // First, clear any existing binding to allow fresh binding
+        try {
+            connectivityManager.bindProcessToNetwork(null)
+            println("DEBUG: Cleared existing network binding")
+        } catch (e: Exception) {
+            println("DEBUG: Failed to clear binding (this may be normal): ${e.message}")
+        }
+        
+        // Method 1: Try using stored WiFi network first
         lastWifiNetwork?.let { network ->
             val networkCaps = connectivityManager.getNetworkCapabilities(network)
-            if (networkCaps?.hasTransport(NetworkCapabilities.TRANSPORT_WIFI) == true) {
-                connectivityManager.bindProcessToNetwork(network)
-                println("DEBUG: Re-bound process to stored WiFi network for discovery")
+            if (networkCaps?.hasTransport(NetworkCapabilities.TRANSPORT_WIFI) == true &&
+                networkCaps.hasCapability(NetworkCapabilities.NET_CAPABILITY_VALIDATED)) {
                 
-                // Verify binding worked
-                val activeNetwork = connectivityManager.activeNetwork
-                val activeCaps = connectivityManager.getNetworkCapabilities(activeNetwork)
-                println("DEBUG: After binding - Active network: $activeNetwork")
-                println("DEBUG: After binding - Network capabilities: $activeCaps")
-                return
+                try {
+                    connectivityManager.bindProcessToNetwork(network)
+                    println("DEBUG: Re-bound process to stored WiFi network for discovery")
+                    
+                    // Verify binding worked by checking active network
+                    if (verifyWifiBinding()) {
+                        return
+                    } else {
+                        println("DEBUG: Stored WiFi binding verification failed")
+                    }
+                } catch (e: Exception) {
+                    println("DEBUG: Failed to bind to stored network: ${e.message}")
+                }
             }
         }
         
-        // If stored network is not available, find current WiFi network
-        println("DEBUG: Stored WiFi network not available, searching for current WiFi network...")
+        // Method 2: Find and bind to current WiFi network with enhanced selection
+        println("DEBUG: Searching for best available WiFi network...")
         val allNetworks = connectivityManager.allNetworks
+        var bestWifiNetwork: android.net.Network? = null
+        var bestNetworkCaps: NetworkCapabilities? = null
+        
+        // Find the best WiFi network (validated and connected)
         for (network in allNetworks) {
             val networkCaps = connectivityManager.getNetworkCapabilities(network)
             if (networkCaps?.hasTransport(NetworkCapabilities.TRANSPORT_WIFI) == true) {
-                connectivityManager.bindProcessToNetwork(network)
-                lastWifiNetwork = network
-                println("DEBUG: Found and bound to WiFi network: $network")
+                println("DEBUG: Found WiFi network: $network, capabilities: $networkCaps")
                 
-                // Verify binding
-                val activeNetwork = connectivityManager.activeNetwork
-                val activeCaps = connectivityManager.getNetworkCapabilities(activeNetwork)
-                println("DEBUG: After new binding - Active network: $activeNetwork")
-                println("DEBUG: After new binding - Network capabilities: $activeCaps")
-                return
+                // Prefer validated networks
+                if (networkCaps.hasCapability(NetworkCapabilities.NET_CAPABILITY_VALIDATED)) {
+                    bestWifiNetwork = network
+                    bestNetworkCaps = networkCaps
+                    println("DEBUG: Selected validated WiFi network: $network")
+                    break
+                } else if (bestWifiNetwork == null) {
+                    // Fallback to any WiFi network
+                    bestWifiNetwork = network
+                    bestNetworkCaps = networkCaps
+                    println("DEBUG: Selected fallback WiFi network: $network")
+                }
             }
         }
         
-        println("DEBUG: No WiFi network available for binding")
+        // Bind to the best WiFi network found
+        bestWifiNetwork?.let { network ->
+            try {
+                connectivityManager.bindProcessToNetwork(network)
+                lastWifiNetwork = network
+                println("DEBUG: Found and bound to WiFi network: $network")
+                println("DEBUG: Network capabilities: $bestNetworkCaps")
+                
+                // Verify binding worked
+                if (verifyWifiBinding()) {
+                    return
+                } else {
+                    println("DEBUG: WiFi binding verification failed, attempting aggressive rebind...")
+                    
+                    // Aggressive rebind attempt
+                    Thread.sleep(1000) // Short delay
+                    connectivityManager.bindProcessToNetwork(null)
+                    Thread.sleep(500)
+                    connectivityManager.bindProcessToNetwork(network)
+                    
+                    if (verifyWifiBinding()) {
+                        println("DEBUG: Aggressive rebind succeeded")
+                        return
+                    }
+                }
+            } catch (e: Exception) {
+                println("DEBUG: Failed to bind to WiFi network: ${e.message}")
+            }
+        }
+        
+        println("DEBUG: No WiFi network available for binding or all binding attempts failed")
+    }
+    
+    /**
+     * Verifies that the current network binding is actually using WiFi
+     */
+    private fun verifyWifiBinding(): Boolean {
+        return try {
+            val activeNetwork = connectivityManager.activeNetwork
+            val activeCaps = connectivityManager.getNetworkCapabilities(activeNetwork)
+            
+            println("DEBUG: Verifying binding - Active network: $activeNetwork")
+            println("DEBUG: Verifying binding - Network capabilities: $activeCaps")
+            
+            val isWifiActive = activeCaps?.hasTransport(NetworkCapabilities.TRANSPORT_WIFI) == true
+            if (isWifiActive) {
+                println("DEBUG: ✅ WiFi binding verification SUCCESS - traffic will use WiFi")
+            } else {
+                println("DEBUG: ❌ WiFi binding verification FAILED - traffic still using cellular/other")
+            }
+            
+            isWifiActive
+        } catch (e: Exception) {
+            println("DEBUG: WiFi binding verification error: ${e.message}")
+            false
+        }
     }
 
     /**
