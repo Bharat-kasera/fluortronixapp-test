@@ -232,43 +232,49 @@ class DeviceOnboardingViewModel @Inject constructor(
             if (result.isSuccess) {
                     addDebugLog("✅ Credentials sent successfully, ESP will switch networks")
                     
-                    // Try automatic reconnection first, fallback to manual if needed
-                    addDebugLog("🔄 Attempting automatic reconnection to '$trimmedSSID'...")
+                    // Attempt fully automatic reconnection to saved WiFi
+                    addDebugLog("🔄 Switching back to saved WiFi network '$trimmedSSID'...")
                     val targetConnectionResult = wifiService.connectToWifiAsync(trimmedSSID, trimmedPassword, isEspDevice = false)
                     
                     if (!targetConnectionResult.isSuccess) {
-                        val error = targetConnectionResult.exceptionOrNull()?.message ?: "Reconnection failed"
+                        val error = targetConnectionResult.exceptionOrNull()?.message ?: "WiFi switch failed"
+                        addDebugLog("❌ Automatic WiFi reconnection failed!")
+                        addDebugLog("🔍 Error details: $error")
                         
-                        // Check if this is automatic reconnection failure
-                        if (error.contains("Automatic reconnection failed") || error.contains("manually connect")) {
-                            addDebugLog("⚠️ Automatic reconnection failed")
-                            addDebugLog("📱 Opening WiFi settings - please connect to '$trimmedSSID'")
+                        // Check if this is the specific automatic reconnection failure
+                        if (error.contains("Automatic WiFi reconnection failed") || error.contains("need manual connection")) {
+                            addDebugLog("📱 Automatic reconnection failed - opening WiFi settings...")
+                            addDebugLog("⚠️ Please manually connect to '$trimmedSSID' in WiFi settings")
                             
-                            // Open WiFi settings automatically
+                            // Open WiFi settings for manual connection
                             try {
                                 wifiService.openWifiSettings()
-                                addDebugLog("✅ WiFi settings opened - please connect to '$trimmedSSID' and return to app")
+                                addDebugLog("✅ WiFi settings opened - please connect to '$trimmedSSID'")
+                                addDebugLog("💡 After connecting, return to this app and wait for ESP discovery")
                             } catch (e: Exception) {
                                 addDebugLog("❌ Failed to open WiFi settings: ${e.message}")
-                                addDebugLog("📲 Please manually go to WiFi settings and connect to '$trimmedSSID'")
+                                addDebugLog("📲 Please manually go to Settings > WiFi and connect to '$trimmedSSID'")
                             }
                             
-                            // Continue with the flow - give user time to connect manually
-                        } else {
-                            addDebugLog("❌ Failed to clear ESP binding: $error")
-                            addDebugLog("🔧 Clearing network bindings due to failure...")
+                            // Continue with the flow - device discovery will verify connection
+                            addDebugLog("🔄 Continuing to ESP device discovery phase...")
+                        } else if (error.contains("No WiFi networks available")) {
+                            addDebugLog("❌ No WiFi networks found - please check WiFi is enabled")
+                            addDebugLog("🔧 Clearing network bindings...")
                             wifiService.restoreInternetAccess()
-                            _provisioningState.value = ProvisioningState.Failure("Failed to clear ESP binding: $error")
+                            _provisioningState.value = ProvisioningState.Failure("No WiFi networks available - please enable WiFi and try again")
                             return@launch
+                        } else {
+                            addDebugLog("⚠️ Continuing with device discovery despite WiFi issues...")
                         }
                     } else {
-                        addDebugLog("🎉 Automatic reconnection successful!")
-                        addDebugLog("✅ Connected to '$trimmedSSID' automatically")
+                        addDebugLog("🎉 Automatic WiFi reconnection successful!")
+                        addDebugLog("✅ Connected to '$trimmedSSID' automatically - no manual steps needed")
                     }
                     
-                    // Give ESP time to switch networks (user should be connected by now)
+                    // Give ESP time to switch networks and user time to manually connect if needed
                     addDebugLog("⏳ Waiting 20 seconds for ESP device to complete network transition...")
-                    addDebugLog("💡 Ensure your phone is connected to '$trimmedSSID' before continuing")
+                    addDebugLog("💡 If WiFi settings opened, please connect to '$trimmedSSID' during this time")
                     delay(20000) 
                     
                     _provisioningState.value = ProvisioningState.DiscoveringDevice
@@ -312,9 +318,9 @@ class DeviceOnboardingViewModel @Inject constructor(
                             addDebugLog("✅ Device discovered and saved successfully!")
                             
                             _provisioningState.value = ProvisioningState.Success
-                            addDebugLog("🎉 Provisioning completed successfully!")
-                            addDebugLog("✅ You now have both internet access AND ESP device control")
-                            addDebugLog("📶 No duplicate networks - using your original WiFi connection")
+                            addDebugLog("🎉 ESP device provisioning completed successfully!")
+                            addDebugLog("✅ Internet access and ESP device control both working")
+                            addDebugLog("📶 No duplicate networks - using proper saved WiFi connection")
                             addDebugLog("🚀 ESP device is ready for control!")
                         } else {
                             addDebugLog("❌ Device discovery returned null result")
