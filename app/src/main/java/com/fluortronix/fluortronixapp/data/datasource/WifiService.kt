@@ -105,43 +105,65 @@ class WifiService @Inject constructor(
         return suspendCancellableCoroutine { continuation ->
             if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.Q) {
                 
-                // For target WiFi networks (not ESP), just clear ESP binding and skip reconnection
+                // For target WiFi networks (not ESP), try automatic reconnection first
                 if (!isEspDevice) {
-                    println("DEBUG: 🔄 Clearing ESP binding - user will manually reconnect to '$ssid'")
+                    println("DEBUG: 🔄 Attempting automatic reconnection to '$ssid'")
                     
                     // Clear ESP binding to restore normal WiFi management
                     try {
                         connectivityManager.bindProcessToNetwork(null)
-                        println("DEBUG: ✅ Cleared ESP binding - WiFi management restored to Android")
+                        println("DEBUG: ✅ Cleared ESP binding - Android can now manage WiFi automatically")
                     } catch (e: Exception) {
                         println("DEBUG: Failed to clear ESP binding: ${e.message}")
                     }
                     
-                    // Give a moment for the binding to clear, then return success
+                    // Give Android time to automatically reconnect to saved WiFi
                     GlobalScope.launch {
-                        delay(1000) // Brief delay to ensure binding is cleared
+                        delay(2000) // Wait 2 seconds for binding to fully clear
                         
-                        // Return success - the app will proceed to device discovery
-                        // User should manually reconnect to home WiFi first
-                        if (continuation.isActive) {
-                            println("DEBUG: ✅ ESP binding cleared - ready for manual WiFi reconnection")
+                        // Monitor for automatic reconnection
+                        var attemptCount = 0
+                        val maxAttempts = 10 // 10 seconds total
+                        var reconnected = false
+                        
+                        while (attemptCount < maxAttempts && !reconnected) {
+                            delay(1000) // Check every second
+                            attemptCount++
                             
-                            // Find any available network to return as success result
-                            // The network object itself doesn't matter for manual reconnection
-                            val activeNetwork = connectivityManager.activeNetwork
-                            val availableNetworks = connectivityManager.allNetworks
-                            
-                            val networkToReturn = activeNetwork ?: availableNetworks.firstOrNull()
-                            
-                            if (networkToReturn != null) {
-                                // Return success with any available network
-                                continuation.resume(Result.success(networkToReturn))
-                            } else {
-                                // This should be extremely rare - no networks available at all
-                                // In this case, we'll return failure but with a clear message
-                                println("DEBUG: Warning: No networks available - user must manually connect to WiFi")
-                                continuation.resume(Result.failure(Exception("ESP binding cleared - please manually connect to WiFi (no networks currently available)")))
+                            try {
+                                val currentWifiInfo = wifiManager.connectionInfo
+                                val currentSSID = currentWifiInfo?.ssid?.replace("\"", "") // Remove quotes
+                                
+                                println("DEBUG: Auto-reconnection attempt $attemptCount/$maxAttempts - Current SSID: '$currentSSID', Target: '$ssid'")
+                                
+                                if (currentSSID == ssid) {
+                                    println("DEBUG: 🎉 Android automatically reconnected to '$ssid'!")
+                                    reconnected = true
+                                    
+                                    // Find the current WiFi network
+                                    val allNetworks = connectivityManager.allNetworks
+                                    for (network in allNetworks) {
+                                        val networkCaps = connectivityManager.getNetworkCapabilities(network)
+                                        if (networkCaps?.hasTransport(NetworkCapabilities.TRANSPORT_WIFI) == true) {
+                                            lastWifiNetwork = network
+                                            println("DEBUG: ✅ Using automatically reconnected WiFi network: $network")
+                                            
+                                            if (continuation.isActive) {
+                                                continuation.resume(Result.success(network))
+                                            }
+                                            return@launch
+                                        }
+                                    }
+                                }
+                            } catch (e: Exception) {
+                                println("DEBUG: Error during auto-reconnection check: ${e.message}")
                             }
+                        }
+                        
+                        // If automatic reconnection failed, return with instructions for manual connection
+                        if (!reconnected && continuation.isActive) {
+                            println("DEBUG: ⚠️ Automatic reconnection failed - user will need to manually connect")
+                            continuation.resume(Result.failure(Exception("Automatic reconnection failed - please manually connect to '$ssid'")))
                         }
                     }
                     
@@ -297,6 +319,20 @@ class WifiService @Inject constructor(
         }
         
         println("DEBUG: No WiFi network available for binding or all binding attempts failed")
+    }
+    
+    /**
+     * Opens WiFi settings for manual connection
+     */
+    fun openWifiSettings() {
+        try {
+            val intent = android.content.Intent(android.provider.Settings.ACTION_WIFI_SETTINGS)
+            intent.flags = android.content.Intent.FLAG_ACTIVITY_NEW_TASK
+            context.startActivity(intent)
+            println("DEBUG: ✅ Opened WiFi settings for manual connection")
+        } catch (e: Exception) {
+            println("DEBUG: ❌ Failed to open WiFi settings: ${e.message}")
+        }
     }
     
     /**
