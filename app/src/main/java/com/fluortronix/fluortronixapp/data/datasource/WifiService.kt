@@ -104,6 +104,53 @@ class WifiService @Inject constructor(
     suspend fun connectToWifiAsync(ssid: String, pass: String, isEspDevice: Boolean = false): Result<android.net.Network> {
         return suspendCancellableCoroutine { continuation ->
             if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.Q) {
+                
+                // For target WiFi networks (not ESP), just clear ESP binding and skip reconnection
+                if (!isEspDevice) {
+                    println("DEBUG: 🔄 Clearing ESP binding - user will manually reconnect to '$ssid'")
+                    
+                    // Clear ESP binding to restore normal WiFi management
+                    try {
+                        connectivityManager.bindProcessToNetwork(null)
+                        println("DEBUG: ✅ Cleared ESP binding - WiFi management restored to Android")
+                    } catch (e: Exception) {
+                        println("DEBUG: Failed to clear ESP binding: ${e.message}")
+                    }
+                    
+                    // Give a moment for the binding to clear, then return success
+                    GlobalScope.launch {
+                        delay(1000) // Brief delay to ensure binding is cleared
+                        
+                        // Return success - the app will proceed to device discovery
+                        // User should manually reconnect to home WiFi first
+                        if (continuation.isActive) {
+                            println("DEBUG: ✅ ESP binding cleared - ready for manual WiFi reconnection")
+                            
+                            // Find any available network to return as success result
+                            // The network object itself doesn't matter for manual reconnection
+                            val activeNetwork = connectivityManager.activeNetwork
+                            val availableNetworks = connectivityManager.allNetworks
+                            
+                            val networkToReturn = activeNetwork ?: availableNetworks.firstOrNull()
+                            
+                            if (networkToReturn != null) {
+                                // Return success with any available network
+                                continuation.resume(Result.success(networkToReturn))
+                            } else {
+                                // This should be extremely rare - no networks available at all
+                                // In this case, we'll return failure but with a clear message
+                                println("DEBUG: Warning: No networks available - user must manually connect to WiFi")
+                                continuation.resume(Result.failure(Exception("ESP binding cleared - please manually connect to WiFi (no networks currently available)")))
+                            }
+                        }
+                    }
+                    
+                    return@suspendCancellableCoroutine
+                }
+                
+                // For ESP devices, create ephemeral connection as before
+                println("DEBUG: Creating new ESP connection to $ssid")
+                
                 val specifier = WifiNetworkSpecifier.Builder()
                     .setSsid(ssid)
                     .setWpa2Passphrase(pass)
@@ -117,28 +164,10 @@ class WifiService @Inject constructor(
             val callback = object : ConnectivityManager.NetworkCallback() {
                 override fun onAvailable(network: android.net.Network) {
                     super.onAvailable(network)
-                    println("DEBUG: WiFi connection available for $ssid")
+                    println("DEBUG: ESP WiFi connection available for $ssid")
                     
-                    if (isEspDevice) {
-                        connectivityManager.bindProcessToNetwork(network)
-                        println("DEBUG: Process bound to ESP network")
-                    } else {
-                        // For target WiFi networks, store network reference but delay binding
-                        // to allow Android to establish proper connection quality first
-                        lastWifiNetwork = network
-                        println("DEBUG: Target WiFi network connected: $ssid (binding delayed for stability)")
-                        
-                        // Delay binding to allow network to stabilize
-                        GlobalScope.launch {
-                            delay(3000) // Wait 3 seconds for connection to stabilize
-                            try {
-                                connectivityManager.bindProcessToNetwork(network)
-                                println("DEBUG: Process bound to stabilized WiFi network: $ssid")
-                            } catch (e: Exception) {
-                                println("DEBUG: Failed to bind to network after delay: ${e.message}")
-                            }
-                        }
-                    }
+                    connectivityManager.bindProcessToNetwork(network)
+                    println("DEBUG: Process bound to ESP network")
                     
                     if (continuation.isActive) {
                         continuation.resume(Result.success(network))
@@ -147,15 +176,15 @@ class WifiService @Inject constructor(
 
                 override fun onUnavailable() {
                     super.onUnavailable()
-                    println("DEBUG: WiFi connection unavailable for $ssid")
+                    println("DEBUG: ESP WiFi connection unavailable for $ssid")
                     if (continuation.isActive) {
-                        continuation.resume(Result.failure(Exception("WiFi connection unavailable")))
+                        continuation.resume(Result.failure(Exception("ESP WiFi connection unavailable")))
                     }
                 }
 
                 override fun onLost(network: android.net.Network) {
                     super.onLost(network)
-                    println("DEBUG: WiFi connection lost for $ssid")
+                    println("DEBUG: ESP WiFi connection lost for $ssid")
                 }
             }
 
@@ -268,6 +297,66 @@ class WifiService @Inject constructor(
         }
         
         println("DEBUG: No WiFi network available for binding or all binding attempts failed")
+    }
+    
+    /**
+     * Restores normal internet access by clearing app network bindings
+     * Call this if you need normal internet access after ESP provisioning
+     * WARNING: This may make ESP devices temporarily unreachable
+     */
+    fun restoreInternetAccess() {
+        try {
+            println("DEBUG: *** CLEARING ALL NETWORK BINDINGS ***")
+            
+            // Clear the process network binding to allow Android to manage WiFi naturally
+            connectivityManager.bindProcessToNetwork(null)
+            
+            // Clear stored network reference
+            lastWifiNetwork = null
+            
+            println("DEBUG: ✅ Network bindings cleared successfully")
+            
+            // Give Android time to restore natural network management
+            Thread.sleep(2000)
+            
+            // Verify that Android has restored proper network state
+            val activeNetwork = connectivityManager.activeNetwork
+            val networkCaps = connectivityManager.getNetworkCapabilities(activeNetwork)
+            
+            println("DEBUG: Post-cleanup network state:")
+            println("DEBUG: Active network: $activeNetwork")
+            println("DEBUG: Network capabilities: $networkCaps")
+            
+            if (activeNetwork != null && networkCaps?.hasTransport(NetworkCapabilities.TRANSPORT_WIFI) == true) {
+                println("DEBUG: ✅ Android successfully restored WiFi network state")
+            } else {
+                println("DEBUG: ⚠️ Android network state unclear - may need manual reconnection")
+                
+                // Try to help Android by briefly toggling WiFi binding to current network
+                val allNetworks = connectivityManager.allNetworks
+                for (network in allNetworks) {
+                    val caps = connectivityManager.getNetworkCapabilities(network)
+                    if (caps?.hasTransport(NetworkCapabilities.TRANSPORT_WIFI) == true &&
+                        caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_VALIDATED)) {
+                        
+                        println("DEBUG: Attempting to help Android restore WiFi binding...")
+                        try {
+                            connectivityManager.bindProcessToNetwork(network)
+                            Thread.sleep(500)
+                            connectivityManager.bindProcessToNetwork(null)
+                            println("DEBUG: ✅ Helped Android restore network state")
+                            break
+                        } catch (e: Exception) {
+                            println("DEBUG: Helper binding failed: ${e.message}")
+                        }
+                    }
+                }
+            }
+            
+        } catch (e: Exception) {
+            println("DEBUG: ⚠️ Failed to clear network bindings: ${e.message}")
+            // Even if this fails, Android might still recover automatically
+        }
     }
     
     /**

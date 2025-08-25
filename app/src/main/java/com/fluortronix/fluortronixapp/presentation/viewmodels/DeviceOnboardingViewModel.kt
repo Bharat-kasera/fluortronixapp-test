@@ -212,6 +212,8 @@ class DeviceOnboardingViewModel @Inject constructor(
                 if (!espConnectionResult.isSuccess) {
                     val error = espConnectionResult.exceptionOrNull()?.message ?: "Failed to connect to ESP device"
                     addDebugLog("❌ Failed to connect to ESP device: $error")
+                    addDebugLog("🔧 Clearing network bindings due to ESP connection failure...")
+                    wifiService.restoreInternetAccess()
                     _provisioningState.value = ProvisioningState.Failure("Failed to connect to ESP device: $error")
                     return@launch
                 }
@@ -230,27 +232,33 @@ class DeviceOnboardingViewModel @Inject constructor(
             if (result.isSuccess) {
                     addDebugLog("✅ Credentials sent successfully, ESP will switch networks")
                     
-                    // After successful provisioning, the device will disconnect and connect to the new network.
-                    // We need to switch back to that network and wait for the device to come online.
-                    addDebugLog("Switching phone back to target WiFi network...")
+                    // Clear ESP binding and prompt user to manually reconnect
+                    addDebugLog("📲 Clearing ESP binding - please manually reconnect to your home WiFi now")
                     val targetConnectionResult = wifiService.connectToWifiAsync(trimmedSSID, trimmedPassword, isEspDevice = false)
                     
                     if (!targetConnectionResult.isSuccess) {
-                        val error = targetConnectionResult.exceptionOrNull()?.message ?: "Failed to connect to target WiFi"
-                        addDebugLog("❌ Failed to connect to target WiFi: $error")
-                        _provisioningState.value = ProvisioningState.Failure("Failed to connect to target WiFi: $error")
-                        return@launch
+                        val error = targetConnectionResult.exceptionOrNull()?.message ?: "Failed to clear ESP binding"
+                        
+                        // Check if this is the special case of "ESP binding cleared successfully"
+                        if (error.contains("ESP binding cleared") || error.contains("please manually connect")) {
+                            addDebugLog("⚠️ $error")
+                            addDebugLog("✅ ESP binding cleared successfully - continuing to device discovery")
+                            // Continue with the flow - don't return here
+                        } else {
+                            addDebugLog("❌ Failed to clear ESP binding: $error")
+                            addDebugLog("🔧 Clearing network bindings due to failure...")
+                            wifiService.restoreInternetAccess()
+                            _provisioningState.value = ProvisioningState.Failure("Failed to clear ESP binding: $error")
+                            return@launch
+                        }
+                    } else {
+                        addDebugLog("✅ ESP binding cleared - WiFi management restored to Android")
                     }
                     
-                    addDebugLog("✅ Successfully connected to target WiFi: ${ssid.value}")
-                    
-                    // Give time for the ESP8266 to complete its transition:
-                    // - Stop SoftAP server
-                    // - Switch to Station mode  
-                    // - Connect to new WiFi (up to 20 seconds)
-                    // - Start web server
-                    // Optimized wait time for ESP web server to be ready
+                    // Prompt user to manually reconnect and give ESP time to switch networks
+                    addDebugLog("📱 PLEASE GO TO WIFI SETTINGS AND RECONNECT TO '$trimmedSSID' NOW")
                     addDebugLog("⏳ Waiting 20 seconds for ESP device to complete network transition...")
+                    addDebugLog("💡 While waiting, please ensure your phone is connected to '$trimmedSSID'")
                     delay(20000) 
                     
                     _provisioningState.value = ProvisioningState.DiscoveringDevice
@@ -290,8 +298,13 @@ class DeviceOnboardingViewModel @Inject constructor(
                             // Save the device to repository so it shows up in home screen
                             deviceRepository.addDevice(discoveredDevice)
                             _newDevice.value = discoveredDevice
-                            _provisioningState.value = ProvisioningState.Success
+                            
                             addDebugLog("✅ Device discovered and saved successfully!")
+                            
+                            _provisioningState.value = ProvisioningState.Success
+                            addDebugLog("🎉 Provisioning completed successfully!")
+                            addDebugLog("✅ You should now have both internet access AND ESP device control")
+                            addDebugLog("📶 No duplicate networks - using your original saved WiFi connection")
                         } else {
                             addDebugLog("❌ Device discovery returned null result")
                             _provisioningState.value = ProvisioningState.Failure("Device discovery returned null result")
@@ -302,6 +315,8 @@ class DeviceOnboardingViewModel @Inject constructor(
                     }
                 } else {
                     addDebugLog("❌ Failed to send credentials: ${result.exceptionOrNull()?.message}")
+                    addDebugLog("🔧 Clearing network bindings due to failure...")
+                    wifiService.restoreInternetAccess()
                     _provisioningState.value = ProvisioningState.Failure(result.exceptionOrNull()?.message ?: "Unknown error")
                 }
             } catch (e: Exception) {
