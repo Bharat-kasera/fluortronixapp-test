@@ -2,6 +2,7 @@ package com.fluortronix.fluortronixapp.presentation.viewmodels
 
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
+import androidx.compose.ui.graphics.ImageBitmap
 import com.fluortronix.fluortronixapp.data.datasource.ESPDeviceService
 import com.fluortronix.fluortronixapp.data.models.Device
 import com.fluortronix.fluortronixapp.data.models.Room
@@ -32,7 +33,11 @@ data class DeviceDetailsUiState(
     val isBlinking: Boolean = false,
     val availableRooms: List<Room> = emptyList(),
     val showDeleteConfirmation: Boolean = false,
-    val showRoomSelection: Boolean = false
+    val showRoomSelection: Boolean = false,
+    // Device image state
+    val deviceImage: ImageBitmap? = null,
+    val isLoadingImage: Boolean = false,
+    val imageError: String? = null
 )
 
 enum class ConnectionStatus {
@@ -79,6 +84,7 @@ class DeviceDetailsViewModel @Inject constructor(
      */
     fun initialize(deviceId: String) {
         loadDeviceDetails(deviceId)
+        loadDeviceImage(deviceId)
     }
     
     /**
@@ -505,6 +511,98 @@ class DeviceDetailsViewModel @Inject constructor(
      */
     fun clearError() {
         _uiState.value = _uiState.value.copy(error = null)
+    }
+    
+    /**
+     * Load device image from cache or download from ESP device
+     */
+    private fun loadDeviceImage(deviceId: String, forceRefresh: Boolean = false) {
+        viewModelScope.launch {
+            try {
+                _uiState.update { it.copy(isLoadingImage = true, imageError = null) }
+                
+                val device = _uiState.value.device ?: loadDeviceFromStorage(deviceId)
+                if (device?.ipAddress == null) {
+                    _uiState.update { 
+                        it.copy(
+                            isLoadingImage = false,
+                            imageError = "Device IP address not available"
+                        )
+                    }
+                    return@launch
+                }
+                
+                // Check network connectivity first
+                val networkValidation = espDeviceService.validateDeviceNetworkConnectivity(device)
+                if (networkValidation.isFailure) {
+                    _uiState.update { 
+                        it.copy(
+                            isLoadingImage = false,
+                            imageError = "Device not reachable on network"
+                        )
+                    }
+                    return@launch
+                }
+                
+                // Download or load cached image
+                val imageResult = espDeviceService.getDeviceImage(device, forceRefresh)
+                
+                if (imageResult.isSuccess) {
+                    _uiState.update { 
+                        it.copy(
+                            deviceImage = imageResult.getOrThrow(),
+                            isLoadingImage = false,
+                            imageError = null
+                        )
+                    }
+                    println("DEBUG: Device image loaded successfully for ${device.name}")
+                } else {
+                    val errorMessage = imageResult.exceptionOrNull()?.message ?: "Unknown image error"
+                    val detailedError = when {
+                        errorMessage.contains("404") -> "Image not found on device (missing device.jpg)"
+                        errorMessage.contains("timeout") -> "Connection timeout - device may be busy"
+                        errorMessage.contains("not found on ESP device") -> "Device image file missing from ESP"
+                        errorMessage.contains("Network validation failed") -> "Device not reachable on network"
+                        errorMessage.contains("IP address not available") -> "Device IP address missing"
+                        else -> errorMessage
+                    }
+                    
+                    _uiState.update { 
+                        it.copy(
+                            isLoadingImage = false,
+                            imageError = detailedError
+                        )
+                    }
+                    println("DEBUG: Failed to load device image for ${device.name}: $detailedError")
+                }
+                
+            } catch (e: Exception) {
+                _uiState.update { 
+                    it.copy(
+                        isLoadingImage = false,
+                        imageError = "Image loading error: ${e.message}"
+                    )
+                }
+                println("DEBUG: Exception loading device image: ${e.message}")
+            }
+        }
+    }
+    
+    /**
+     * Refresh device image from ESP device (force download)
+     */
+    fun refreshDeviceImage() {
+        val deviceId = _uiState.value.device?.id
+        if (deviceId != null) {
+            loadDeviceImage(deviceId, forceRefresh = true)
+        }
+    }
+    
+    /**
+     * Clear device image error
+     */
+    fun clearImageError() {
+        _uiState.update { it.copy(imageError = null) }
     }
     
     /**

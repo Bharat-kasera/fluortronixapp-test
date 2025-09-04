@@ -8,6 +8,7 @@ import com.fluortronix.fluortronixapp.data.PreferencesManager
 import com.fluortronix.fluortronixapp.data.dao.RoutineDao
 import com.fluortronix.fluortronixapp.data.database.AppDatabase
 import com.fluortronix.fluortronixapp.data.datasource.ESPDeviceService
+import com.fluortronix.fluortronixapp.data.datasource.ImageCacheService
 import com.fluortronix.fluortronixapp.data.datasource.WifiService
 import com.google.gson.Gson
 import com.google.gson.GsonBuilder
@@ -77,10 +78,19 @@ object AppModule {
 
     @Provides
     @Singleton
+    fun provideImageCacheService(
+        @ApplicationContext context: Context
+    ): ImageCacheService {
+        return ImageCacheService(context)
+    }
+
+    @Provides
+    @Singleton
     fun provideESPDeviceService(
         wifiService: WifiService,
+        imageCacheService: ImageCacheService,
         @ApplicationContext context: Context
     ): ESPDeviceService {
-        return ESPDeviceService(wifiService, context)
+        return ESPDeviceService(wifiService, imageCacheService, context)
     }
 } 

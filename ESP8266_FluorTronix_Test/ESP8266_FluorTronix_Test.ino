@@ -61,6 +61,10 @@ unsigned long lastRoutineCheck = 0;       // Prevents routine spam-execution
 // 256-447:   Slider names (192 bytes = 6 channels × 32 bytes)
 // 448+:      Routines (variable size based on routine count)
 // 2040-2047: Triple reset detection (8 bytes)
+//   2040:    Magic number (0xAB)
+//   2041:    Reset count (0-255)
+//   2042-2045: Last reset time (4 bytes, uint32_t)
+//   2046-2047: Reserved for future use
 const int ROUTINE_EEPROM_START = 448;
 const int ROUTINE_SIZE = sizeof(ESPRoutine);
 const int TRIPLE_RESET_EEPROM_START = 2040;
@@ -292,6 +296,7 @@ void startWebServer() {
   Serial.println("  - POST /api/device/power");
   Serial.println("  - POST /api/device/slider");
   Serial.println("  - GET  /api/routines");
+  Serial.println("  - GET  /data/device.jpg");
   Serial.println("Device IP: " + WiFi.localIP().toString());
   Serial.println("============================");
 }
@@ -318,6 +323,7 @@ void setupAPIRoutes() {
   server.on("/api/device/status", HTTP_GET, handleStatus);            // System health check
   server.on("/api/device/spd", HTTP_GET, handleSPDFile);              // Spectral Power Distribution data
   server.on("/data/data.xlsx", HTTP_GET, handleExcelFile);            // Excel data file download
+  server.on("/data/device.jpg", HTTP_GET, handleDeviceImage);         // Device image download
   
   // Device Control APIs
   server.on("/api/device/power", HTTP_POST, handlePowerControl);      // Turn device on/off
@@ -418,6 +424,37 @@ void handleExcelFile() {
   } else {
     Serial.println("Excel file not found in SPIFFS");
     server.send(404, "text/plain", "Excel file not found. Please upload data.xlsx to SPIFFS using Arduino IDE data upload tool.");
+  }
+}
+
+void handleDeviceImage() {
+  addCORSHeaders();
+  
+  Serial.println("Device image requested: /data/device.jpg");
+  
+  if (SPIFFS.exists("/device.jpg")) {  // ← Fixed: Check root level like Excel file
+    File imageFile = SPIFFS.open("/device.jpg", "r");
+    if (imageFile) {
+      size_t fileSize = imageFile.size();
+      Serial.printf("Serving device image, size: %d bytes\n", fileSize);
+      
+      // Set appropriate headers for image
+      server.sendHeader("Content-Type", "image/jpeg");
+      server.sendHeader("Content-Length", String(fileSize));
+      server.sendHeader("Cache-Control", "public, max-age=86400"); // Cache for 1 day
+      
+      // Stream the file content
+      server.streamFile(imageFile, "image/jpeg");
+      imageFile.close();
+      
+      Serial.println("Device image served successfully");
+    } else {
+      Serial.println("Failed to open device image file");
+      server.send(500, "text/plain", "Failed to open device image");
+    }
+  } else {
+    Serial.println("Device image not found in SPIFFS");
+    server.send(404, "text/plain", "Device image not found. Please upload device.jpg to SPIFFS /data/ directory.");
   }
 }
 
@@ -971,23 +1008,83 @@ void loadWiFiCredentials() {
 void checkTripleResetDetection() {
   rst_info* resetInfo = ESP.getResetInfoPtr();
   
-  // Only count manual resets (external reset button presses)
-  bool isManualReset = (resetInfo->reason == REASON_EXT_SYS_RST);
-  
   // Read reset data using individual bytes (more reliable on ESP8266)
   uint8_t magicByte = EEPROM.read(TRIPLE_RESET_EEPROM_START);
   uint8_t resetCount = EEPROM.read(TRIPLE_RESET_EEPROM_START + 1);
   
+  // Read last reset time (stored as 4 bytes)
+  uint32_t lastResetTime = 0;
+  for (int i = 0; i < 4; i++) {
+    lastResetTime |= (uint32_t(EEPROM.read(TRIPLE_RESET_EEPROM_START + 2 + i)) << (i * 8));
+  }
+  
+  // Initialize EEPROM if magic number is wrong
   if (magicByte != TRIPLE_RESET_MAGIC) {
     resetCount = 0;
+    lastResetTime = 0;
     EEPROM.write(TRIPLE_RESET_EEPROM_START, TRIPLE_RESET_MAGIC);
     EEPROM.write(TRIPLE_RESET_EEPROM_START + 1, 0);
+    // Clear last reset time (4 bytes)
+    for (int i = 0; i < 4; i++) {
+      EEPROM.write(TRIPLE_RESET_EEPROM_START + 2 + i, 0);
+    }
     EEPROM.commit();
   }
   
-  if (isManualReset) {
+  // Get current time since boot (we'll use millis() for timing)
+  // For a more robust solution, we need to track actual time between resets
+  uint32_t currentBootTime = millis();
+  
+  // Enhanced reset detection - only count resets that meet all criteria:
+  // 1. External system reset (button press or manual reset)
+  // 2. Device has been running for at least 2 seconds (not immediate restart/programming)
+  // 3. Sufficient time has passed since last manual reset check (human-like timing)
+  
+  bool isLikelyManualReset = false;
+  
+  // Check if this is an external reset (button press)
+  if (resetInfo->reason == REASON_EXT_SYS_RST) {
+    // Additional checks to filter out serial monitor resets:
+    
+    // 1. If device boots very quickly after startup, it's likely programming/serial monitor
+    if (currentBootTime > 2000) { // Device has been running for at least 2 seconds
+      isLikelyManualReset = true;
+    }
+    
+    // 2. Check if this reset happens too quickly after the last one (likely programming)
+    // We use a simple approach: if EEPROM was just initialized, it's likely the first real boot
+    if (lastResetTime == 0) {
+      // First reset or fresh EEPROM - likely legitimate
+      isLikelyManualReset = true;
+    }
+  }
+  
+  // Alternative approach: Only count HARDWARE_RESET or USER_RESET if available
+  // ESP8266 reset reasons that are more likely to be manual:
+  bool isDefinitelyManualReset = (resetInfo->reason == REASON_EXT_SYS_RST && 
+                                 currentBootTime > 2000); // At least 2 seconds of runtime
+  
+  Serial.println("=== RESET DETECTION DEBUG ===");
+  Serial.println("Reset reason: " + String(resetInfo->reason));
+  Serial.println("Boot time: " + String(currentBootTime) + "ms");
+  Serial.println("Last reset time: " + String(lastResetTime));
+  Serial.println("Current reset count: " + String(resetCount));
+  Serial.println("Is likely manual: " + String(isLikelyManualReset ? "YES" : "NO"));
+  Serial.println("=============================");
+  
+  if (isLikelyManualReset) {
+    // Store current time for next reset comparison
+    uint32_t timeToStore = millis();
+    for (int i = 0; i < 4; i++) {
+      EEPROM.write(TRIPLE_RESET_EEPROM_START + 2 + i, (timeToStore >> (i * 8)) & 0xFF);
+    }
+    
     // Increment reset counter for manual resets
     resetCount++;
+    
+    Serial.println("*** MANUAL RESET DETECTED ***");
+    Serial.println("Reset count incremented to: " + String(resetCount));
+    Serial.println("****************************");
     
     // Save incremented count immediately
     EEPROM.write(TRIPLE_RESET_EEPROM_START + 1, resetCount);
@@ -1003,6 +1100,10 @@ void checkTripleResetDetection() {
       // Clear the reset counter first to prevent loops
       EEPROM.write(TRIPLE_RESET_EEPROM_START, 0);     // Clear magic
       EEPROM.write(TRIPLE_RESET_EEPROM_START + 1, 0); // Clear count
+      // Clear last reset time
+      for (int i = 0; i < 4; i++) {
+        EEPROM.write(TRIPLE_RESET_EEPROM_START + 2 + i, 0);
+      }
       EEPROM.commit();
       
       // Now clear all device data
@@ -1020,11 +1121,30 @@ void checkTripleResetDetection() {
       return;
     }
   } else {
-    // Any non-manual reset clears the counter
-    if (resetCount > 0) {
+    // Not a manual reset - this could be:
+    // 1. Programming/upload reset
+    // 2. Serial monitor connection reset  
+    // 3. Power cycle reset
+    // 4. Software reset
+    // 5. Watchdog reset
+    
+    Serial.println("*** NON-MANUAL RESET DETECTED ***");
+    Serial.println("Reset reason: " + String(resetInfo->reason));
+    Serial.println("This reset will NOT count toward factory reset");
+    
+    // Clear reset counter for non-manual resets after a delay
+    // This prevents serial monitor from constantly resetting the counter
+    if (resetCount > 0 && currentBootTime > 5000) { // Only clear after 5 seconds of stable operation
+      Serial.println("Clearing reset counter due to non-manual reset");
       EEPROM.write(TRIPLE_RESET_EEPROM_START + 1, 0);
+      // Clear last reset time
+      for (int i = 0; i < 4; i++) {
+        EEPROM.write(TRIPLE_RESET_EEPROM_START + 2 + i, 0);
+      }
       EEPROM.commit();
     }
+    
+    Serial.println("********************************");
   }
 }
 

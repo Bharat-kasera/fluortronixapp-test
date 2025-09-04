@@ -84,6 +84,9 @@ interface ESPDeviceApi {
     @GET("/data/data.xlsx")
     suspend fun getExcelFile(): Response<okhttp3.ResponseBody>
     
+    @GET("/data/device.jpg")
+    suspend fun getDeviceImage(): Response<okhttp3.ResponseBody>
+    
     @POST("/api/device/power")
     suspend fun setPower(@Body request: ESPPowerRequest): Response<ESPCommandResponse>
     
@@ -116,6 +119,7 @@ interface ESPDeviceApi {
 @Singleton
 class ESPDeviceService @Inject constructor(
     private val wifiService: WifiService,
+    private val imageCacheService: ImageCacheService,
     @ApplicationContext private val context: Context
 ) {
     
@@ -695,6 +699,112 @@ class ESPDeviceService @Inject constructor(
         } catch (e: Exception) {
             Result.failure(e)
         }
+    }
+    
+    /**
+     * Download and cache device image from ESP device
+     * Returns the cached image or downloads it if not available
+     */
+    suspend fun getDeviceImage(device: Device, forceRefresh: Boolean = false): Result<androidx.compose.ui.graphics.ImageBitmap> {
+        return try {
+            val deviceId = device.id
+            
+            // Check if image exists in cache and force refresh is not requested
+            if (!forceRefresh && imageCacheService.hasDeviceImage(deviceId)) {
+                println("DEBUG: Loading device image from cache for device: ${device.name}")
+                val cachedImageResult = imageCacheService.loadDeviceImage(deviceId)
+                if (cachedImageResult.isSuccess) {
+                    return cachedImageResult
+                } else {
+                    println("DEBUG: Failed to load cached image, will download fresh: ${cachedImageResult.exceptionOrNull()?.message}")
+                }
+            }
+            
+            // Download image from device
+            val downloadResult = downloadDeviceImageFromESP(device)
+            if (downloadResult.isFailure) {
+                return Result.failure(downloadResult.exceptionOrNull() ?: Exception("Image download failed"))
+            }
+            
+            val imageStream = downloadResult.getOrThrow()
+            
+            // Save to cache
+            val saveResult = imageCacheService.saveDeviceImage(deviceId, imageStream)
+            if (saveResult.isFailure) {
+                println("DEBUG: Failed to save device image to cache: ${saveResult.exceptionOrNull()?.message}")
+                // Continue anyway, we can still return the downloaded image
+            }
+            
+            // Load the saved image from cache
+            val loadResult = imageCacheService.loadDeviceImage(deviceId)
+            if (loadResult.isSuccess) {
+                println("DEBUG: Device image downloaded and cached successfully for: ${device.name}")
+                loadResult
+            } else {
+                Result.failure(Exception("Failed to load saved device image: ${loadResult.exceptionOrNull()?.message}"))
+            }
+            
+        } catch (e: Exception) {
+            println("DEBUG: Exception in getDeviceImage for ${device.name}: ${e.message}")
+            Result.failure(e)
+        }
+    }
+    
+    /**
+     * Download device image from ESP device
+     * Private helper method for downloading the raw image stream
+     */
+    private suspend fun downloadDeviceImageFromESP(device: Device): Result<InputStream> {
+        return try {
+            val ipAddress = device.ipAddress ?: return Result.failure(
+                Exception("Device IP address is not available")
+            )
+            
+            println("DEBUG: Downloading device image from ESP at $ipAddress")
+            
+            val api = createApiForDevice(ipAddress)
+            val response = api.getDeviceImage()
+            
+            if (response.isSuccessful) {
+                val responseBody = response.body()
+                if (responseBody != null) {
+                    val contentLength = responseBody.contentLength()
+                    println("DEBUG: Device image download successful, size: $contentLength bytes")
+                    
+                    // Validate that we received an image (basic check)
+                    if (contentLength > 0) {
+                        Result.success(responseBody.byteStream())
+                    } else {
+                        Result.failure(Exception("Downloaded image is empty"))
+                    }
+                } else {
+                    Result.failure(Exception("Empty response body from device"))
+                }
+            } else {
+                val errorMsg = when (response.code()) {
+                    404 -> "Device image not found on ESP device (device.jpg missing)"
+                    500 -> "ESP device internal error while accessing image"
+                    503 -> "ESP device temporarily unavailable"
+                    else -> "Failed to download device image: HTTP ${response.code()}"
+                }
+                println("DEBUG: Device image download failed: $errorMsg")
+                Result.failure(Exception(errorMsg))
+            }
+        } catch (e: java.net.ConnectException) {
+            Result.failure(Exception("Cannot connect to device - check network connection"))
+        } catch (e: java.net.SocketTimeoutException) {
+            Result.failure(Exception("Device image download timeout - device may be busy"))
+        } catch (e: Exception) {
+            println("DEBUG: Exception downloading device image: ${e.message}")
+            Result.failure(e)
+        }
+    }
+    
+    /**
+     * Clear cached device image
+     */
+    suspend fun clearDeviceImageCache(deviceId: String): Result<Boolean> {
+        return imageCacheService.deleteDeviceImage(deviceId)
     }
 
     /**

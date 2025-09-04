@@ -10,11 +10,15 @@ import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Home
 import androidx.compose.material.icons.filled.Visibility
+import androidx.compose.material.icons.filled.Refresh
+import androidx.compose.material.icons.filled.Error
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.ImageBitmap
+import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.tooling.preview.Preview
 import androidx.compose.ui.unit.dp
@@ -115,7 +119,7 @@ fun DeviceDetailsScreen(
                     contentPadding = PaddingValues(16.dp),
                     verticalArrangement = Arrangement.spacedBy(16.dp)
                 ) {
-                    // Lottie Animation with Device Info
+                    // Device Image with Device Info
                     item {
                         Row(
                             modifier = Modifier
@@ -124,16 +128,12 @@ fun DeviceDetailsScreen(
                             horizontalArrangement = Arrangement.SpaceBetween,
                             verticalAlignment = Alignment.CenterVertically
                         ) {
-                            // Lottie Animation on the left
-                            val composition by rememberLottieComposition(LottieCompositionSpec.RawRes(R.raw.device))
-                            val progress by animateLottieCompositionAsState(
-                                composition = composition,
-                                iterations = LottieConstants.IterateForever
-                            )
-                            LottieAnimation(
-                                composition = composition,
-                                progress = { progress },
-                                modifier = Modifier.size(100.dp)
+                            // Device Image on the left
+                            DeviceImageDisplay(
+                                deviceImage = uiState.deviceImage,
+                                isLoadingImage = uiState.isLoadingImage,
+                                imageError = uiState.imageError,
+                                onRefreshImage = { viewModel.refreshDeviceImage() }
                             )
                             
                             // Device name and room info on the right
@@ -555,4 +555,154 @@ private fun RoomSelectionDialog(
         },
         containerColor = Color(0xFFFFFEFE)
     )
+}
+
+@Composable
+private fun DeviceImageDisplay(
+    deviceImage: ImageBitmap?,
+    isLoadingImage: Boolean,
+    imageError: String?,
+    onRefreshImage: () -> Unit,
+    modifier: Modifier = Modifier
+) {
+    // ========== ADAPTIVE FRAME CUSTOMIZATION OPTIONS ==========
+    val adaptiveModifier = remember(deviceImage) {
+        if (deviceImage != null) {
+            val imageAspectRatio = deviceImage.width.toFloat() / deviceImage.height.toFloat()
+            
+            // OPTION 1: FIXED WIDTH, ADAPTIVE HEIGHT (Current)
+            val frameWidth = 120.dp  // ← ADJUST: Base width (80dp-150dp recommended)
+            val frameHeight = frameWidth / imageAspectRatio
+            val clampedHeight = frameHeight.coerceIn(80.dp, 160.dp)  // ← ADJUST: Height limits
+            
+            // OPTION 2: COMPLETELY FLEXIBLE (Uncomment to use)
+            // val maxSize = 140.dp
+            // val minSize = 80.dp
+            // if (imageAspectRatio > 1) {
+            //     // Wide image: fix width, adjust height
+            //     modifier.size(width = maxSize, height = (maxSize / imageAspectRatio).coerceAtLeast(minSize))
+            // } else {
+            //     // Tall image: fix height, adjust width
+            //     modifier.size(width = (maxSize * imageAspectRatio).coerceAtLeast(minSize), height = maxSize)
+            // }
+            
+            // OPTION 3: SQUARE WITH MAXIMUM SIZE (Uncomment to use)
+            // val squareSize = minOf(120.dp, maxOf(80.dp, 100.dp / maxOf(imageAspectRatio, 1f/imageAspectRatio)))
+            // modifier.size(squareSize)
+            
+            // CURRENT CHOICE: Using Option 1
+            modifier.size(
+                width = frameWidth,
+                height = clampedHeight
+            )
+        } else {
+            // Default square size for loading/error states
+            modifier.size(120.dp)  // ← ADJUST: Match your chosen base size above
+        }
+    }
+    
+    Box(
+        modifier = adaptiveModifier
+            .clip(RoundedCornerShape(16.dp))
+            .background(
+                color = PrimaryBlue.copy(alpha = 0.1f),
+                shape = RoundedCornerShape(16.dp)
+            )
+            .border(
+                border = BorderStroke(2.dp, PrimaryBlue.copy(alpha = 0.3f)),
+                shape = RoundedCornerShape(16.dp)
+            ),
+        contentAlignment = Alignment.Center
+    ) {
+        when {
+            // Loading state
+            isLoadingImage -> {
+                Column(
+                    horizontalAlignment = Alignment.CenterHorizontally,
+                    verticalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    CircularProgressIndicator(
+                        color = PrimaryBlue,
+                        modifier = Modifier.size(24.dp),
+                        strokeWidth = 2.dp
+                    )
+                    Text(
+                        text = "Loading",
+                        fontSize = 10.sp,
+                        color = PrimaryBlue,
+                        fontWeight = FontWeight.Medium
+                    )
+                }
+            }
+            
+            // Image loaded successfully
+            deviceImage != null -> {
+                Image(
+                    bitmap = deviceImage,
+                    contentDescription = "Device Image",
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .clip(RoundedCornerShape(14.dp)), // Slightly smaller radius for inner content
+                    contentScale = ContentScale.Fit // Options:
+                    // ContentScale.Fit       - Fits entire image, may have padding (current)
+                    // ContentScale.Crop      - Fills frame, crops excess (original)
+                    // ContentScale.FillBounds - Stretches to fill exactly
+                    // ContentScale.Inside    - Like Fit but never scales up
+                    // ContentScale.FillWidth - Fits width, may crop height
+                    // ContentScale.FillHeight - Fits height, may crop width
+                )
+            }
+            
+            // Error state with retry option
+            imageError != null -> {
+                Column(
+                    horizontalAlignment = Alignment.CenterHorizontally,
+                    verticalArrangement = Arrangement.spacedBy(4.dp),
+                    modifier = Modifier.padding(8.dp)
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.Error,
+                        contentDescription = "Image Error",
+                        tint = Color(0xFFE57373),
+                        modifier = Modifier.size(24.dp)
+                    )
+                    Text(
+                        text = "Image\nFailed",
+                        fontSize = 9.sp,
+                        color = Color(0xFFE57373),
+                        textAlign = TextAlign.Center,
+                        lineHeight = 10.sp,
+                        fontWeight = FontWeight.Medium
+                    )
+                    IconButton(
+                        onClick = onRefreshImage,
+                        modifier = Modifier.size(20.dp)
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.Refresh,
+                            contentDescription = "Retry",
+                            tint = PrimaryBlue,
+                            modifier = Modifier.size(16.dp)
+                        )
+                    }
+                }
+            }
+            
+            // Fallback to Lottie animation
+            else -> {
+                val composition by rememberLottieComposition(LottieCompositionSpec.RawRes(R.raw.device))
+                val progress by animateLottieCompositionAsState(
+                    composition = composition,
+                    iterations = LottieConstants.IterateForever
+                )
+                LottieAnimation(
+                    composition = composition,
+                    progress = { progress },
+                    modifier = Modifier.fillMaxSize()
+                )
+            }
+        }
+        
+
+    }
 }
