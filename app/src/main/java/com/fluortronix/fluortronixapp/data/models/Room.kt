@@ -34,11 +34,11 @@ data class Room(
     /**
      * Create a copy with updated device list
      */
-    fun withDevices(devices: List<String>, newAllowedModel: String? = null): Room {
+    fun withDevices(devices: List<String>, newAllowedModel: String? = this.allowedDeviceModel): Room {
         return copy(
             deviceIds = devices,
             deviceCount = devices.size,
-            allowedDeviceModel = newAllowedModel ?: allowedDeviceModel,
+            allowedDeviceModel = newAllowedModel,
             lastModified = System.currentTimeMillis()
         )
     }

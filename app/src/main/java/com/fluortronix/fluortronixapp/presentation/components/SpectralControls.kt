@@ -298,7 +298,7 @@ fun SpectralPowerDistributionChart(
             Canvas(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .height(350.dp)
+                    .height(240.dp)  // ← DECREASED: Was 350.dp, now 250.dp
                     .clip(RoundedCornerShape(8.dp))
                     .background(Color.White)
                     .padding(2.dp)
@@ -542,31 +542,7 @@ private fun DrawScope.drawSPDChart(
         )
     }
 
-    // --- REMOVED Y-axis labels (intensity) AND their tick marks ---
-    // val yLabelCount = 4
-    // for (i in 0..yLabelCount) {
-    //     val intensity = maxIntensity * (yLabelCount - i) / yLabelCount
-    //     val y = padding + (i.toFloat() / yLabelCount) * chartHeight
-    //
-    //     // REMOVED Y-axis tick mark:
-    //     // drawLine(
-    //     //     color = Color.Gray,
-    //     //     start = Offset(padding - 5.dp.toPx(), y),
-    //     //     end = Offset(padding, y),
-    //     //     strokeWidth = 1.dp.toPx()
-    //     // )
-    //
-    //     // REMOVED Y-axis label:
-    //     // drawText(
-    //     //     textMeasurer = textMeasurer,
-    //     //     text = String.format("%.1f", intensity),
-    //     //     topLeft = Offset(5.dp.toPx(), y - 6.dp.toPx()),
-    //     //     style = TextStyle(
-    //     //         color = Color.Gray,
-    //     //         fontSize = 10.sp
-    //     //     )
-    //     // )
-    // }
+
 }
 
 @Composable

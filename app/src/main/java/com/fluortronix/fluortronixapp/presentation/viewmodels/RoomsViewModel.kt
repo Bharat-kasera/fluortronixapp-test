@@ -62,6 +62,11 @@ class RoomsViewModel @Inject constructor(
                 val unassignedDevices = devices.filter { it.roomId == null }
                 val roomStats = calculateRoomStats(rooms, devices)
                 
+                println("DEBUG: UI State Update - Total devices: ${devices.size}, Unassigned: ${unassignedDevices.size}, Rooms: ${rooms.size}")
+                unassignedDevices.forEach { device ->
+                    println("DEBUG: Unassigned device: ${device.name}, Model: ${device.deviceModel}")
+                }
+                
                 _uiState.value = _uiState.value.copy(
                     rooms = rooms,
                     devices = devices,
@@ -386,28 +391,9 @@ class RoomsViewModel @Inject constructor(
      */
     fun assignDeviceToRoom(deviceId: String, roomId: String): Boolean {
         val device = _devices.value.find { it.id == deviceId }
-        val room = _rooms.value.find { it.id == roomId }
         
-        if (device == null || room == null) {
-            _uiState.value = _uiState.value.copy(error = "Device or room not found")
-            return false
-        }
-        
-        // Validate device model compatibility
-        if (!room.canAddDeviceModel(device.deviceModel)) {
-            _uiState.value = _uiState.value.copy(
-                error = "Device model '${device.deviceModel}' is not compatible with room '${room.name}'. " +
-                        "Room already contains devices of model '${room.allowedDeviceModel}'"
-            )
-            return false
-        }
-        
-        // Validate spectral data compatibility if room has spectral data
-        if (room.hasSpectralData() && !room.isDeviceModelCompatibleWithSpectral(device.deviceModel)) {
-            _uiState.value = _uiState.value.copy(
-                error = "Device model '${device.deviceModel}' is not compatible with the spectral data in room '${room.name}'. " +
-                        "The room's spectral profile was configured for model '${room.spectralData?.spectralProfile?.deviceModel}'"
-            )
+        if (device == null) {
+            _uiState.value = _uiState.value.copy(error = "Device not found")
             return false
         }
         
@@ -417,6 +403,36 @@ class RoomsViewModel @Inject constructor(
                 
                 // Stop device monitoring temporarily to prevent race conditions
                 stopDeviceMonitoring()
+                
+                // Get FRESH room data from storage to avoid stale cache issues
+                val room = preferencesManager.getRoomData(roomId)
+                if (room == null) {
+                    _uiState.value = _uiState.value.copy(error = "Room not found")
+                    loadData()
+                    return@launch
+                }
+                
+                println("DEBUG: Fresh room data - allowedDeviceModel: ${room.allowedDeviceModel}, hasSpectralData: ${room.hasSpectralData()}")
+                
+                // Validate device model compatibility with FRESH room data
+                if (!room.canAddDeviceModel(device.deviceModel)) {
+                    _uiState.value = _uiState.value.copy(
+                        error = "Device model '${device.deviceModel}' is not compatible with room '${room.name}'. " +
+                                "Room already contains devices of model '${room.allowedDeviceModel}'"
+                    )
+                    loadData()
+                    return@launch
+                }
+                
+                // Validate spectral data compatibility if room has spectral data
+                if (room.hasSpectralData() && !room.isDeviceModelCompatibleWithSpectral(device.deviceModel)) {
+                    _uiState.value = _uiState.value.copy(
+                        error = "Device model '${device.deviceModel}' is not compatible with the spectral data in room '${room.name}'. " +
+                                "The room's spectral profile was configured for model '${room.spectralData?.spectralProfile?.deviceModel}'"
+                    )
+                    loadData()
+                    return@launch
+                }
                 
                 val success = preferencesManager.assignDeviceToRoom(deviceId, roomId)
                 if (success) {
@@ -671,15 +687,20 @@ class RoomsViewModel @Inject constructor(
      * Gets devices that can be assigned to a specific room (compatible model)
      */
     fun getCompatibleDevicesForRoom(roomId: String): List<Device> {
+        // For now, use cached room data but with enhanced empty room logic
+        // The assignment validation will use fresh data when actually assigning
         val room = _rooms.value.find { it.id == roomId } ?: return emptyList()
         
         return _devices.value.filter { device ->
             // Device must be unassigned or already in this room
             (device.roomId == null || device.roomId == roomId) &&
-            // Device model must be compatible with room's allowed model
-            (room.allowedDeviceModel == null || room.allowedDeviceModel == device.deviceModel) &&
-            // Device model must be compatible with room's spectral data (if any)
-            room.isDeviceModelCompatibleWithSpectral(device.deviceModel)
+            // For empty rooms, always allow any device model
+            (room.deviceIds.isEmpty() || (
+                // Device model must be compatible with room's allowed model
+                (room.allowedDeviceModel == null || room.allowedDeviceModel == device.deviceModel) &&
+                // Device model must be compatible with room's spectral data (if any)
+                room.isDeviceModelCompatibleWithSpectral(device.deviceModel)
+            ))
         }
     }
     

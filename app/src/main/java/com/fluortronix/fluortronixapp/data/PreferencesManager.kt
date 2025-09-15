@@ -352,10 +352,19 @@ class PreferencesManager @Inject constructor(
             val updatedDeviceIds = room.deviceIds.toMutableList()
             updatedDeviceIds.remove(deviceId)
             
-            val updatedRoom = room.withDevices(
-                devices = updatedDeviceIds,
-                newAllowedModel = if (updatedDeviceIds.isEmpty()) null else room.allowedDeviceModel
-            )
+            val updatedRoom = if (updatedDeviceIds.isEmpty()) {
+                // Room is now empty - reset both device model AND spectral data constraints
+                room.withDevices(
+                    devices = updatedDeviceIds,
+                    newAllowedModel = null
+                ).withSpectralData(null)
+            } else {
+                // Room still has devices - keep existing constraints
+                room.withDevices(
+                    devices = updatedDeviceIds,
+                    newAllowedModel = room.allowedDeviceModel
+                )
+            }
             
             // Save both entities
             saveDeviceData(deviceId, updatedDevice)

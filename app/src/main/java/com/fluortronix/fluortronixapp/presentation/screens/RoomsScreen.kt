@@ -441,6 +441,7 @@ private fun UnassignedDeviceCard(
             availableRooms = availableRooms,
             onDismiss = { showRoomSelection = false },
             onRoomSelected = { roomId ->
+                println("DEBUG: RoomSelectionDialog - User selected room $roomId for device ${device.id}")
                 onAssignToRoom(device.id, roomId)
                 showRoomSelection = false
             }
@@ -457,39 +458,97 @@ private fun RoomSelectionDialog(
 ) {
     AlertDialog(
         onDismissRequest = onDismiss,
-        title = { Text("Assign ${device.name}") },
+        title = { 
+            Text(
+                text = "Assign ${device.name}",
+                fontSize = 18.sp,
+                fontWeight = FontWeight.Medium
+            ) 
+        },
         text = {
-            LazyColumn(
-                verticalArrangement = Arrangement.spacedBy(8.dp)
+            // Mobile responsive container
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .heightIn(max = 400.dp) // Responsive max height for mobile
+                    .padding(vertical = 8.dp)
             ) {
-                val compatibleRooms = availableRooms.filter { room ->
-                    room.canAddDeviceModel(device.deviceModel)
-                }
-                
-                if (compatibleRooms.isEmpty()) {
-                    item {
-                        Text(
-                            text = "No compatible rooms available. Device model '${device.deviceModel}' cannot be mixed with existing devices in any room.",
-                            color = Color.Gray,
-                            fontSize = 14.sp
-                        )
+                LazyColumn(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .weight(1f, fill = false), // Allow shrinking if content is small
+                    verticalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    // Filter rooms for compatibility - allow empty rooms to accept any device model
+                    val compatibleRooms = availableRooms.filter { room ->
+                        val isEmptyRoom = room.deviceIds.isEmpty()
+                        val canAdd = room.canAddDeviceModel(device.deviceModel)
+                        println("DEBUG: Room '${room.name}' - isEmpty: $isEmptyRoom, allowedModel: ${room.allowedDeviceModel}, canAdd: $canAdd, deviceModel: ${device.deviceModel}")
+                        
+                        // For empty rooms, always allow any device model
+                        if (isEmptyRoom) {
+                            true
+                        } else {
+                            canAdd
+                        }
                     }
-                } else {
-                    items(compatibleRooms) { room ->
-                        CompactRoomCard(
-                            room = room,
-                            onClick = { onRoomSelected(room.id) }
-                        )
+                    
+                    println("DEBUG: RoomSelectionDialog - Total rooms: ${availableRooms.size}, Compatible: ${compatibleRooms.size}")
+                    
+                    if (compatibleRooms.isEmpty()) {
+                        item {
+                            Box(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(16.dp),
+                                contentAlignment = Alignment.Center
+                            ) {
+                                Text(
+                                    text = "No compatible rooms available.\n\nDevice model '${device.deviceModel}' cannot be mixed with existing devices in any room.",
+                                    color = Color.Gray,
+                                    fontSize = 14.sp,
+                                    textAlign = TextAlign.Center,
+                                    lineHeight = 20.sp
+                                )
+                            }
+                        }
+                    } else {
+                        item {
+                            Text(
+                                text = "Select a room for ${device.name}:",
+                                fontSize = 14.sp,
+                                color = Color(0xFF666666),
+                                modifier = Modifier.padding(bottom = 4.dp)
+                            )
+                        }
+                        items(compatibleRooms) { room ->
+                            CompactRoomCard(
+                                room = room,
+                                onClick = { onRoomSelected(room.id) }
+                            )
+                        }
                     }
                 }
             }
         },
         confirmButton = {},
         dismissButton = {
-            TextButton(onClick = onDismiss) {
-                Text("Cancel")
+            TextButton(
+                onClick = onDismiss,
+                modifier = Modifier.padding(horizontal = 8.dp)
+            ) {
+                Text(
+                    text = "Cancel",
+                    color = Color.Gray,
+                    fontSize = 16.sp
+                )
             }
-        }
+        },
+        containerColor = Color(0xFFFFFEFE), // ← Added the requested color
+        shape = RoundedCornerShape(16.dp), // More modern rounded corners
+        modifier = Modifier
+            .fillMaxWidth(0.95f) // Responsive width - 95% of screen width
+            .padding(horizontal = 16.dp) // Side margins for mobile
     )
 }
 

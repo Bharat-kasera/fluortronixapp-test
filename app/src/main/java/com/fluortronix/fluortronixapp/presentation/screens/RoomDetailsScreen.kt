@@ -13,6 +13,8 @@ import androidx.compose.material.icons.filled.CloudDownload
 import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material.icons.filled.ExpandLess
 import androidx.compose.material.icons.filled.ExpandMore
+import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.filled.Info
 import androidx.compose.material.icons.filled.Power
 import androidx.compose.material.icons.filled.PowerOff
 import androidx.compose.material.icons.filled.Refresh
@@ -66,6 +68,7 @@ fun RoomDetailsScreen(
     // Dialog states
     var showEditRoomDialog by remember { mutableStateOf(false) }
     var showAssignDeviceDialog by remember { mutableStateOf(false) }
+    var showRoomOverviewModal by remember { mutableStateOf(false) }
 
     // Snackbar state
     val snackbarHostState = remember { SnackbarHostState() }
@@ -151,7 +154,8 @@ fun RoomDetailsScreen(
                 room = room,
                 onNavigateBack = onNavigateBack,
                 onEditClick = { showEditRoomDialog = true },
-                onRefresh = { viewModel.loadData() }
+                onRefresh = { viewModel.loadData() },
+                onInfoClick = { showRoomOverviewModal = true }
             )
         },
         snackbarHost = {
@@ -183,28 +187,14 @@ fun RoomDetailsScreen(
                 modifier = Modifier
                     .fillMaxSize()
                     .padding(paddingValues),
-                contentPadding = PaddingValues(16.dp),
+                contentPadding = PaddingValues(
+                    start = 16.dp,
+                    end = 16.dp,
+                    top = 4.dp,
+                    bottom = 16.dp
+                ),
                 verticalArrangement = Arrangement.spacedBy(16.dp)
             ) {
-                // Room overview card
-                item {
-                    RoomOverviewCard(
-                        room = room,
-                        roomStats = roomStats,
-                        onPowerToggle = { 
-                            // Toggle room power state first
-                            viewModel.toggleRoomPower(room.id)
-                            
-                            // Also toggle ESP devices if any are connected to spectral controls
-                            if (spectralUiState.connectedDevices.isNotEmpty()) {
-                                spectralViewModel.toggleEspDevicesPower(!room.isAllDevicesOn)
-                            }
-                        },
-                        onAssignDevice = { showAssignDeviceDialog = true }
-                    )
-                }
-
-
                 // Spectral controls section
                 item {
                     SpectralControlsSection(
@@ -282,8 +272,31 @@ fun RoomDetailsScreen(
             availableDevices = uiState.unassignedDevices,
             onDismiss = { showAssignDeviceDialog = false },
             onAssignDevice = { deviceId: String ->
+                println("DEBUG: RoomDetailsScreen - Assigning device $deviceId to room ${room.id}")
                 viewModel.assignDeviceToRoom(deviceId, room.id)
                 showAssignDeviceDialog = false
+            }
+        )
+    }
+
+    // Room Overview Modal
+    if (showRoomOverviewModal) {
+        RoomOverviewModal(
+            room = room,
+            roomStats = roomStats,
+            onDismiss = { showRoomOverviewModal = false },
+            onPowerToggle = { 
+                // Toggle room power state first
+                viewModel.toggleRoomPower(room.id)
+                
+                // Also toggle ESP devices if any are connected to spectral controls
+                if (spectralUiState.connectedDevices.isNotEmpty()) {
+                    spectralViewModel.toggleEspDevicesPower(!room.isAllDevicesOn)
+                }
+            },
+            onAssignDevice = { 
+                showRoomOverviewModal = false
+                showAssignDeviceDialog = true 
             }
         )
     }
@@ -295,7 +308,8 @@ private fun RoomDetailsTopBar(
     room: Room,
     onNavigateBack: () -> Unit,
     onEditClick: () -> Unit,
-    onRefresh: () -> Unit
+    onRefresh: () -> Unit,
+    onInfoClick: () -> Unit
 ) {
     TopAppBar(
         title = {
@@ -306,11 +320,11 @@ private fun RoomDetailsTopBar(
                     fontWeight = FontWeight.Bold,
                     color = Color.Black
                 )
-                Text(
-                    text = "${room.deviceCount} device${if (room.deviceCount != 1) "s" else ""} • ${room.getDeviceModelDisplay()}",
-                    fontSize = 12.sp,
-                    color = Color.Gray
-                )
+//                Text(
+//                    text = "${room.deviceCount} device${if (room.deviceCount != 1) "s" else ""} • ${room.getDeviceModelDisplay()}",
+//                    fontSize = 12.sp,
+//                    color = Color.Gray
+//                )
             }
         },
         navigationIcon = {
@@ -323,6 +337,13 @@ private fun RoomDetailsTopBar(
             }
         },
         actions = {
+            IconButton(onClick = onInfoClick) {
+                Icon(
+                    imageVector = Icons.Default.Info,
+                    contentDescription = "Room Info",
+                    tint = PrimaryBlue
+                )
+            }
             IconButton(onClick = onRefresh) {
                 Icon(
                     imageVector = Icons.Default.Refresh,
@@ -527,7 +548,10 @@ fun SpectralControlsSection(
             }
         }
         
-        Spacer(modifier = Modifier.height(16.dp))
+        // Only add spacer when loading, no spacer when spectral data is available
+        if (!spectralUiState.hasSpectralData && spectralUiState.isLoading) {
+            Spacer(modifier = Modifier.height(8.dp))
+        }
         
         // Spectral Controls and Chart
         if (spectralUiState.hasSpectralData) {
@@ -535,7 +559,7 @@ fun SpectralControlsSection(
                 SpectralPowerDistributionChart(
                     graphData = spectralUiState.graphData,
                     title = "SPD Result",
-                    modifier = Modifier.padding(10.dp)
+                    modifier = Modifier.padding(4.dp)
                 )
 //            Spacer(modifier = Modifier.height(16.dp))
 
@@ -868,6 +892,59 @@ private fun AutoDownloadCard(
 }
 
 @Composable
+private fun RoomOverviewModal(
+    room: Room,
+    roomStats: RoomStats?,
+    onDismiss: () -> Unit,
+    onPowerToggle: () -> Unit,
+    onAssignDevice: () -> Unit
+) {
+    // Modal overlay background
+    Box(
+        modifier = Modifier
+            .fillMaxSize()
+            .background(Color.Black.copy(alpha = 0.5f))
+            .clickable { onDismiss() },
+        contentAlignment = Alignment.Center
+    ) {
+        // Modal content container
+        Box(
+            modifier = Modifier
+                .fillMaxWidth(0.9f)
+                .clickable { } // Prevent clicks from passing through
+        ) {
+            // Room Overview Card
+            RoomOverviewCard(
+                room = room,
+                roomStats = roomStats,
+                onPowerToggle = onPowerToggle,
+                onAssignDevice = onAssignDevice
+            )
+            
+            // Close button positioned at top-right
+            IconButton(
+                onClick = onDismiss,
+                modifier = Modifier
+                    .align(Alignment.TopEnd)
+                    .padding(8.dp)
+                    .background(
+                        Color.White.copy(alpha = 0.9f),
+                        shape = CircleShape
+                    )
+                    .size(32.dp)
+            ) {
+                Icon(
+                    imageVector = Icons.Default.Close,
+                    contentDescription = "Close",
+                    tint = Color.Black,
+                    modifier = Modifier.size(20.dp)
+                )
+            }
+        }
+    }
+}
+
+@Composable
 private fun AssignDeviceToRoomDialog(
     room: Room,
     availableDevices: List<com.fluortronix.fluortronixapp.data.models.Device>,
@@ -884,6 +961,11 @@ private fun AssignDeviceToRoomDialog(
             )
         },
         text = {
+            println("DEBUG: AssignDeviceToRoomDialog - Available devices: ${availableDevices.size}")
+            availableDevices.forEach { device ->
+                println("DEBUG: Available device: ${device.name}, Model: ${device.deviceModel}, RoomId: ${device.roomId}")
+            }
+            
             if (availableDevices.isEmpty()) {
                 Column(
                 ) {

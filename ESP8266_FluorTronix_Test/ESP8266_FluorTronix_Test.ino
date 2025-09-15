@@ -1012,16 +1012,16 @@ void checkTripleResetDetection() {
   uint8_t magicByte = EEPROM.read(TRIPLE_RESET_EEPROM_START);
   uint8_t resetCount = EEPROM.read(TRIPLE_RESET_EEPROM_START + 1);
   
-  // Read last reset time (stored as 4 bytes)
-  uint32_t lastResetTime = 0;
+  // Read last reset timestamp (stored as 4 bytes) - using system uptime in seconds
+  uint32_t lastResetTimestamp = 0;
   for (int i = 0; i < 4; i++) {
-    lastResetTime |= (uint32_t(EEPROM.read(TRIPLE_RESET_EEPROM_START + 2 + i)) << (i * 8));
+    lastResetTimestamp |= (uint32_t(EEPROM.read(TRIPLE_RESET_EEPROM_START + 2 + i)) << (i * 8));
   }
   
   // Initialize EEPROM if magic number is wrong
   if (magicByte != TRIPLE_RESET_MAGIC) {
     resetCount = 0;
-    lastResetTime = 0;
+    lastResetTimestamp = 0;
     EEPROM.write(TRIPLE_RESET_EEPROM_START, TRIPLE_RESET_MAGIC);
     EEPROM.write(TRIPLE_RESET_EEPROM_START + 1, 0);
     // Clear last reset time (4 bytes)
@@ -1031,60 +1031,51 @@ void checkTripleResetDetection() {
     EEPROM.commit();
   }
   
-  // Get current time since boot (we'll use millis() for timing)
-  // For a more robust solution, we need to track actual time between resets
-  uint32_t currentBootTime = millis();
+  // Get current system time (seconds since epoch) for proper time tracking
+  time_t currentTime = time(nullptr);
+  uint32_t currentTimestamp = (currentTime > 1000000000) ? currentTime : 0; // Valid unix timestamp check
   
-  // Enhanced reset detection - only count resets that meet all criteria:
-  // 1. External system reset (button press or manual reset)
-  // 2. Device has been running for at least 2 seconds (not immediate restart/programming)
-  // 3. Sufficient time has passed since last manual reset check (human-like timing)
+  // CRITICAL FIX: Only count as manual reset if:
+  // 1. It's an external system reset (button press)
+  // 2. Sufficient time has passed since last reset (at least 2 seconds - human reaction time)
+  // 3. We have valid timestamps to compare
   
   bool isLikelyManualReset = false;
   
-  // Check if this is an external reset (button press)
   if (resetInfo->reason == REASON_EXT_SYS_RST) {
-    // Additional checks to filter out serial monitor resets:
-    
-    // 1. If device boots very quickly after startup, it's likely programming/serial monitor
-    if (currentBootTime > 2000) { // Device has been running for at least 2 seconds
+    if (lastResetTimestamp == 0) {
+      // First reset ever recorded - this could be legitimate first button press
       isLikelyManualReset = true;
-    }
-    
-    // 2. Check if this reset happens too quickly after the last one (likely programming)
-    // We use a simple approach: if EEPROM was just initialized, it's likely the first real boot
-    if (lastResetTime == 0) {
-      // First reset or fresh EEPROM - likely legitimate
-      isLikelyManualReset = true;
+    } else if (currentTimestamp > 0 && lastResetTimestamp > 0) {
+      // We have valid timestamps - check time gap
+      uint32_t timeSinceLastReset = currentTimestamp - lastResetTimestamp;
+      
+      if (timeSinceLastReset >= 2 && timeSinceLastReset <= TRIPLE_RESET_TIMEOUT) {
+        // Reset happened 2-20 seconds after last reset - likely manual
+        isLikelyManualReset = true;
+      } else if (timeSinceLastReset > TRIPLE_RESET_TIMEOUT) {
+        // Too much time passed - reset the counter and start fresh
+        resetCount = 0;
+        isLikelyManualReset = true; // Count this as first reset
+      }
+      // If timeSinceLastReset < 2 seconds, it's likely serial monitor/programming
+    } else {
+      // No valid timestamps available - be conservative and don't count it
+      isLikelyManualReset = false;
     }
   }
   
-  // Alternative approach: Only count HARDWARE_RESET or USER_RESET if available
-  // ESP8266 reset reasons that are more likely to be manual:
-  bool isDefinitelyManualReset = (resetInfo->reason == REASON_EXT_SYS_RST && 
-                                 currentBootTime > 2000); // At least 2 seconds of runtime
-  
-  Serial.println("=== RESET DETECTION DEBUG ===");
-  Serial.println("Reset reason: " + String(resetInfo->reason));
-  Serial.println("Boot time: " + String(currentBootTime) + "ms");
-  Serial.println("Last reset time: " + String(lastResetTime));
-  Serial.println("Current reset count: " + String(resetCount));
-  Serial.println("Is likely manual: " + String(isLikelyManualReset ? "YES" : "NO"));
-  Serial.println("=============================");
+  // Silent operation - no debug messages for normal resets
   
   if (isLikelyManualReset) {
-    // Store current time for next reset comparison
-    uint32_t timeToStore = millis();
+    // Store current timestamp for next reset comparison
+    uint32_t timeToStore = currentTimestamp;
     for (int i = 0; i < 4; i++) {
       EEPROM.write(TRIPLE_RESET_EEPROM_START + 2 + i, (timeToStore >> (i * 8)) & 0xFF);
     }
     
     // Increment reset counter for manual resets
     resetCount++;
-    
-    Serial.println("*** MANUAL RESET DETECTED ***");
-    Serial.println("Reset count incremented to: " + String(resetCount));
-    Serial.println("****************************");
     
     // Save incremented count immediately
     EEPROM.write(TRIPLE_RESET_EEPROM_START + 1, resetCount);
@@ -1123,28 +1114,24 @@ void checkTripleResetDetection() {
   } else {
     // Not a manual reset - this could be:
     // 1. Programming/upload reset
-    // 2. Serial monitor connection reset  
+    // 2. Serial monitor connection reset (MOST COMMON)
     // 3. Power cycle reset
     // 4. Software reset
     // 5. Watchdog reset
+    // 6. Reset too soon after previous reset
     
-    Serial.println("*** NON-MANUAL RESET DETECTED ***");
-    Serial.println("Reset reason: " + String(resetInfo->reason));
-    Serial.println("This reset will NOT count toward factory reset");
-    
-    // Clear reset counter for non-manual resets after a delay
-    // This prevents serial monitor from constantly resetting the counter
-    if (resetCount > 0 && currentBootTime > 5000) { // Only clear after 5 seconds of stable operation
-      Serial.println("Clearing reset counter due to non-manual reset");
-      EEPROM.write(TRIPLE_RESET_EEPROM_START + 1, 0);
-      // Clear last reset time
-      for (int i = 0; i < 4; i++) {
-        EEPROM.write(TRIPLE_RESET_EEPROM_START + 2 + i, 0);
+    // Clear reset counter for non-manual resets ONLY if it's been more than timeout period
+    if (resetCount > 0 && currentTimestamp > 0 && lastResetTimestamp > 0) {
+      uint32_t timeSinceLastReset = currentTimestamp - lastResetTimestamp;
+      if (timeSinceLastReset > TRIPLE_RESET_TIMEOUT) {
+        EEPROM.write(TRIPLE_RESET_EEPROM_START + 1, 0);
+        // Clear last reset time
+        for (int i = 0; i < 4; i++) {
+          EEPROM.write(TRIPLE_RESET_EEPROM_START + 2 + i, 0);
+        }
+        EEPROM.commit();
       }
-      EEPROM.commit();
     }
-    
-    Serial.println("********************************");
   }
 }
 
