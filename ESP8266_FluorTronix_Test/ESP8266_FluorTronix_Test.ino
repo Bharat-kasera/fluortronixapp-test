@@ -1,17 +1,5 @@
 /*
- * FluorTronix ESP8266 LED Controller
- * 
- * This firmware controls a 6-channel LED grow light system with:
- * - WiFi provisioning and connection management
- * - REST API for remote control
- * - Automated scheduling/routines with time sync
- * - EEPROM storage for settings and routines
- * - PWM control of LED channels
- * - Triple reset detection for factory reset (3x reset in 20 seconds)
- * 
- * Hardware: ESP8266 with 6 PWM outputs for LED drivers
- * API Base: /api/device/ and /api/routines/
- * Troubleshooting: Press reset button 3 times within 20 seconds to clear all data
+Press reset button 3 times within 20 seconds to clear all data
  */
 
 #include <ESP8266WiFi.h>
@@ -93,14 +81,7 @@ ESP8266WebServer server(80);
 String AP_SSID = "";
 const char* AP_PASSWORD = "12345678";
 
-/*
- * SETUP - Device Initialization Sequence
- * 1. Hardware setup (Serial, LEDs, EEPROM, SPIFFS)
- * 2. Generate unique AP SSID from MAC address
- * 3. Configure NTP for time synchronization
- * 4. Load saved configuration from EEPROM
- * 5. Attempt WiFi connection or start provisioning AP
- */
+
 void setup() {
   Serial.begin(115200);
   delay(2000); // Longer delay for Mac serial monitor
